@@ -4,6 +4,7 @@ import * as Device from 'expo-device';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { CorruptDownload, DownloadError, InstallError } from './errors';
+import { loadSeenBuild, saveSeenBuild } from './storage';
 
 /**
  * Updating the app from the bridge.
@@ -49,6 +50,28 @@ export function installedBuild(): number {
 export function isNewer(release: Release): boolean {
   return release.versionCode > installedBuild();
 }
+
+/**
+ * Whether this is the first start of a build that arrived as an update.
+ *
+ * The build last run is remembered on disk, and answers from the second run
+ * on. Before that record exists, the package's own install and update times
+ * tell a fresh install from an update over an older build.
+ */
+export const firstRunAfterUpdate: Effect.Effect<boolean> = Effect.gen(function* () {
+  const build = installedBuild();
+  const seen = yield* loadSeenBuild;
+  if (seen === build) return false;
+  yield* saveSeenBuild(build);
+  if (seen !== null) return seen < build;
+
+  const times = yield* Effect.tryPromise(() =>
+    Promise.all([Application.getInstallationTimeAsync(), Application.getLastUpdateTimeAsync()]),
+  ).pipe(Effect.orElseSucceed(() => null));
+  if (!times) return false;
+  const [installed, updated] = times;
+  return updated.getTime() - installed.getTime() > 60_000;
+});
 
 /**
  * The smallest package this device actually runs natively.

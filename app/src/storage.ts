@@ -54,3 +54,30 @@ export const writeSettings = (settings: ConnectionSettings): Effect.Effect<void,
 /** Persisting is a convenience; the session still works without it. */
 export const saveSettings = (settings: ConnectionSettings): Effect.Effect<void> =>
   writeSettings(settings).pipe(Effect.ignore);
+
+// ------------------------------------------------------------------- build
+
+const BUILD_FILE = 'herdr-build.txt';
+
+const buildFile = () => new File(Paths.document, BUILD_FILE);
+
+/** The build the app last ran as, or null before the first run that recorded it. */
+export const loadSeenBuild: Effect.Effect<number | null> = Effect.try({
+  try: () => {
+    const file = buildFile();
+    if (!file.exists) return null;
+    const build = Number(file.textSync().trim());
+    return Number.isFinite(build) ? build : null;
+  },
+  catch: () => new StorageError({ operation: 'read' }),
+}).pipe(Effect.orElseSucceed(() => null));
+
+export const saveSeenBuild = (build: number): Effect.Effect<void> =>
+  Effect.try({
+    try: () => {
+      const file = buildFile();
+      if (!file.exists) file.create();
+      file.write(String(build));
+    },
+    catch: () => new StorageError({ operation: 'write' }),
+  }).pipe(Effect.ignore);

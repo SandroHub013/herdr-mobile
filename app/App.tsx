@@ -12,7 +12,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useSystemChrome } from './src/hooks/useSystemChrome';
 import { useHerdrSession } from './src/hooks/useHerdrSession';
 import { IconSinglePane, IconSplitDown, IconSplitRight } from './src/icons';
-import { EmptyState, PrimaryButton, TextButton } from './src/components/Primitives';
+import { Divider, EmptyState, PrimaryButton, TextButton } from './src/components/Primitives';
 import { Header } from './src/components/Header';
 import { TabBar } from './src/components/TabBar';
 import { Sidebar, collectAgents } from './src/components/Sidebar';
@@ -21,6 +21,7 @@ import { Composer, ComposerKey } from './src/components/Composer';
 import { ActionSheet, Dialog, SheetAction, TextField } from './src/components/Overlays';
 import { Toast, useToast } from './src/components/Toast';
 import { UpdateBanner } from './src/components/UpdateBanner';
+import { VersionRow } from './src/components/VersionRow';
 import { useAppUpdate } from './src/hooks/useAppUpdate';
 
 const SIDEBAR_WIDTH = 272;
@@ -643,6 +644,19 @@ function HerdrApp() {
           placeholder={DEFAULT_SETTINGS.port}
           keyboardType="numeric"
         />
+        <View style={styles.dialogRule}>
+          <Divider />
+        </View>
+        <VersionRow
+          state={appUpdate.state}
+          lastCheck={appUpdate.lastCheck}
+          onCheck={appUpdate.checkNow}
+          onUpdate={() => {
+            // The banner under the header shows the progress; the dialog gets out of its way.
+            setConnectionOpen(false);
+            appUpdate.update();
+          }}
+        />
       </Dialog>
 
       <Dialog
@@ -707,6 +721,10 @@ const styles = StyleSheet.create({
   },
   splitColumn: {
     flexDirection: 'column',
+  },
+  dialogRule: {
+    marginTop: space.xs,
+    marginBottom: space.md,
   },
   scrim: {
     position: 'absolute',
