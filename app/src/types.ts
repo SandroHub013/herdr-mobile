@@ -38,10 +38,20 @@ export interface Snapshot {
 }
 
 export interface Attachment {
+  /** Local, so the entry can be updated as its upload goes through. */
+  id: number;
   name: string;
+  /** Where the picked file is on the phone: what its thumbnail shows. */
+  uri: string;
+  kind: 'image' | 'file';
   state: 'uploading' | 'ready' | 'failed';
   path?: string;
   ref?: string;
+}
+
+export function attachmentKind(name: string, mimeType?: string): 'image' | 'file' {
+  if (mimeType?.startsWith('image/')) return 'image';
+  return /\.(png|jpe?g|gif|webp|bmp)$/i.test(name) ? 'image' : 'file';
 }
 
 const MAX_TITLE_LENGTH = 24;

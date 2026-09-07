@@ -1,7 +1,8 @@
 import React from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { colors, radius, space, type } from '../theme';
+import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { colors, HIT_SLOP, radius, space, type } from '../theme';
 import { IconArrowUp, IconChevron, IconClose, IconPlus } from '../icons';
+import { extensionLabel } from '../files';
 import { Chip, IconButton } from './Primitives';
 import { Attachment } from '../types';
 
@@ -14,7 +15,7 @@ export function Composer({
   onKey,
   onAttach,
   onRemoveAttachment,
-  attachment,
+  attachments,
   targetLabel,
   disabled,
 }: {
@@ -23,39 +24,28 @@ export function Composer({
   onSend: () => void;
   onKey: (key: ComposerKey) => void;
   onAttach: () => void;
-  onRemoveAttachment: () => void;
-  attachment: Attachment | null;
+  onRemoveAttachment: (id: number) => void;
+  attachments: Attachment[];
   targetLabel: string | null;
   disabled: boolean;
 }) {
-  const canSend = value.trim().length > 0 && !disabled;
+  // A message leaves with every reference in it, so it waits for uploads still on their way.
+  const uploading = attachments.some((item) => item.state === 'uploading');
+  const canSend = value.trim().length > 0 && !disabled && !uploading;
 
   return (
     <View style={styles.wrapper}>
-      {attachment ? (
-        <View style={styles.attachment}>
-          <Text numberOfLines={1} style={styles.attachmentName}>
-            {attachment.name}
-          </Text>
-          {attachment.state === 'uploading' ? (
-            <View style={styles.attachmentState}>
-              <ActivityIndicator size="small" color={colors.textMuted} />
-              <Text style={styles.attachmentStateText}>Caricamento</Text>
-            </View>
-          ) : (
-            <Text
-              style={[
-                styles.attachmentStateText,
-                attachment.state === 'failed' && { color: colors.danger },
-              ]}
-            >
-              {attachment.state === 'failed' ? 'Non riuscito' : 'Pronto'}
-            </Text>
-          )}
-          <IconButton accessibilityLabel="Rimuovi l'allegato" onPress={onRemoveAttachment} size={26}>
-            <IconClose size={12} color={colors.textMuted} />
-          </IconButton>
-        </View>
+      {attachments.length > 0 ? (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          keyboardShouldPersistTaps="always"
+          contentContainerStyle={styles.attachments}
+        >
+          {attachments.map((item) => (
+            <AttachmentTile key={item.id} attachment={item} onRemove={() => onRemoveAttachment(item.id)} />
+          ))}
+        </ScrollView>
       ) : null}
 
       <View style={styles.card}>
@@ -131,36 +121,133 @@ export function Composer({
   );
 }
 
+/**
+ * One attachment waiting to be sent: the picture itself when it is one, the
+ * file's kind and name otherwise, with the upload's state laid over it and a
+ * way to take it back.
+ */
+function AttachmentTile({ attachment, onRemove }: { attachment: Attachment; onRemove: () => void }) {
+  const uploading = attachment.state === 'uploading';
+  const failed = attachment.state === 'failed';
+
+  return (
+    <View style={styles.tile} accessibilityLabel={`${attachment.name}, ${describeState(attachment.state)}`}>
+      {attachment.kind === 'image' ? (
+        <Image source={{ uri: attachment.uri }} style={styles.tileImage} resizeMode="cover" />
+      ) : (
+        <View style={styles.tileFile}>
+          <Text style={styles.tileBadge}>{extensionLabel(attachment.name)}</Text>
+          <Text numberOfLines={2} style={styles.tileName}>
+            {attachment.name}
+          </Text>
+        </View>
+      )}
+
+      {uploading ? (
+        <View style={styles.tileVeil}>
+          <ActivityIndicator size="small" color={colors.text} />
+        </View>
+      ) : null}
+      {failed ? (
+        <View style={[styles.tileVeil, styles.tileFailed]}>
+          <Text style={styles.tileFailedText}>Non caricato</Text>
+        </View>
+      ) : null}
+
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={`Rimuovi ${attachment.name}`}
+        onPress={onRemove}
+        hitSlop={HIT_SLOP}
+        style={({ pressed }) => [styles.tileRemove, pressed && { opacity: 0.7 }]}
+      >
+        <IconClose size={11} color={colors.background} />
+      </Pressable>
+    </View>
+  );
+}
+
+function describeState(state: Attachment['state']): string {
+  switch (state) {
+    case 'uploading':
+      return 'in caricamento';
+    case 'ready':
+      return 'pronto';
+    case 'failed':
+      return 'non caricato';
+  }
+}
+
+const TILE = 84;
+
 const styles = StyleSheet.create({
   wrapper: {
     paddingHorizontal: space.md,
     paddingTop: space.sm,
     gap: space.sm,
   },
-  attachment: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  attachments: {
     gap: space.sm,
-    paddingLeft: space.md,
-    paddingRight: 4,
-    paddingVertical: 6,
+    paddingHorizontal: 2,
+    paddingTop: 2,
+  },
+  tile: {
+    width: TILE,
+    height: TILE,
     borderRadius: radius.md,
-    backgroundColor: colors.surface,
+    overflow: 'hidden',
+    backgroundColor: colors.surfaceRaised,
   },
-  attachmentName: {
-    ...type.caption,
-    color: colors.text,
+  tileImage: {
+    width: '100%',
+    height: '100%',
+  },
+  tileFile: {
     flex: 1,
+    padding: space.sm,
+    gap: 4,
+    justifyContent: 'flex-end',
   },
-  attachmentState: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
+  tileBadge: {
+    ...type.section,
+    fontSize: 10,
+    color: colors.textMuted,
   },
-  attachmentStateText: {
+  tileName: {
     ...type.caption,
-    fontSize: 11,
-    color: colors.textFaint,
+    fontSize: 10.5,
+    lineHeight: 13,
+    color: colors.text,
+  },
+  tileVeil: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(11, 11, 13, 0.55)',
+  },
+  tileFailed: {
+    padding: space.xs,
+  },
+  tileFailedText: {
+    ...type.caption,
+    fontSize: 10.5,
+    color: colors.danger,
+    textAlign: 'center',
+  },
+  tileRemove: {
+    position: 'absolute',
+    top: 5,
+    right: 5,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.text,
   },
   card: {
     backgroundColor: colors.surface,
