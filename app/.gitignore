@@ -36,6 +36,7 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-# generated native folders
+# iOS is still generated. android/ is source: it holds the splash, the icons
+# and the install permission done by hand, and the keystore every update must
+# be signed with.
 /ios
-/android
