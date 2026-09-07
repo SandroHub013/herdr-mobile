@@ -13,6 +13,8 @@ import {
 import { colors, radius, space, type } from '../theme';
 import { IconChevron, IconClose, IconExpand, StatusDot } from '../icons';
 import { EmptyState, IconButton } from './Primitives';
+import { SessionFiles } from './SessionFiles';
+import { HerdrApi } from '../api';
 import { LineKind, OutputLine, segmentOutput } from '../ansi';
 import { isBusy, Pane, paneTitle } from '../types';
 
@@ -23,6 +25,7 @@ function openUrl(url: string) {
 }
 
 export function TerminalPane({
+  api,
   pane,
   index,
   text,
@@ -33,7 +36,9 @@ export function TerminalPane({
   onFocus,
   onZoom,
   onClose,
+  notify,
 }: {
+  api: HerdrApi;
   pane: Pane;
   index: number;
   text: string;
@@ -44,6 +49,7 @@ export function TerminalPane({
   onFocus: () => void;
   onZoom: () => void;
   onClose: () => void;
+  notify: (message: string) => void;
 }) {
   const scrollRef = useRef<ScrollView | null>(null);
   const pinnedToBottomRef = useRef(true);
@@ -116,23 +122,45 @@ export function TerminalPane({
           ),
         );
 
+  // The files a line names, once the bridge has confirmed them. Nothing at all otherwise.
+  const renderFiles = (line: OutputLine) =>
+    line.files.length > 0 ? (
+      <SessionFiles
+        api={api}
+        paneId={pane.pane_id}
+        workspaceId={pane.workspace_id}
+        paths={line.files}
+        align={line.kind === 'user' ? 'right' : 'left'}
+        notify={notify}
+      />
+    ) : null;
+
   const outputText = (
     <View style={styles.lines}>
       {lines.map((line, lineIndex) =>
         line.kind === 'user' ? (
           // The reader's own turn sits on the right in its own shape, so the
           // conversation reads as one even though the agent's side is plain.
-          <View key={lineIndex} style={styles.userRow}>
-            <View style={styles.userBubble}>
-              <Text selectable style={styles.userText}>
-                {renderSegments(line)}
-              </Text>
-            </View>
+          // What they attached comes first, above the words, as it was sent.
+          <View key={lineIndex}>
+            {renderFiles(line)}
+            {line.segments.length > 0 ? (
+              <View style={styles.userRow}>
+                <View style={styles.userBubble}>
+                  <Text selectable style={styles.userText}>
+                    {renderSegments(line)}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
           </View>
         ) : (
-          <Text key={lineIndex} selectable style={lineStyles[line.kind]}>
-            {renderSegments(line)}
-          </Text>
+          <View key={lineIndex}>
+            <Text selectable style={lineStyles[line.kind]}>
+              {renderSegments(line)}
+            </Text>
+            {renderFiles(line)}
+          </View>
         ),
       )}
     </View>

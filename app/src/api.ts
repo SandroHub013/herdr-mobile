@@ -1,5 +1,6 @@
 import { Duration, Effect } from 'effect';
 import { Directory, File, Paths } from 'expo-file-system';
+import { SessionFile } from './files';
 import { Release } from './updates';
 import {
   BridgeError,
@@ -94,23 +95,17 @@ const stageForUpload = (file: { uri: string; name: string }): Effect.Effect<File
   });
 
 /**
- * Removes the copies made along the way, once the upload has ended either way.
- *
- * The staged copy is always ours. The picked file is ours only when the picker
- * put it in the cache: a file the user opened from their own storage stays.
- * Failing to delete leaves a stale file in the cache, nothing worse, so it is
- * not reported.
+ * Removes the staged copy once the upload has ended either way. The picked
+ * file stays: the composer shows it as a thumbnail until the message is sent
+ * or the attachment removed, and discards it then. Failing to delete leaves a
+ * stale file in the cache, nothing worse, so it is not reported.
  */
-const discardAfterUpload = (staged: File, pickedUri: string): Effect.Effect<void> =>
+const discardStaged = (staged: File): Effect.Effect<void> =>
   Effect.sync(() => {
-    const doomed = [staged];
-    if (pickedUri.startsWith(Paths.cache.uri)) doomed.push(new File(pickedUri));
-    for (const file of doomed) {
-      try {
-        if (file.exists) file.delete();
-      } catch {
-        // See above.
-      }
+    try {
+      if (staged.exists) staged.delete();
+    } catch {
+      // See above.
     }
   });
 
@@ -130,6 +125,10 @@ export function createApi(baseUrl: string) {
 
   const pane = (paneId: string) => encodeURIComponent(paneId);
 
+  /** A file the transcript names, resolved by the bridge in the pane's working directory. */
+  const fileQuery = (paneId: string, workspaceId: string, path: string) =>
+    `path=${encodeURIComponent(path)}&pane_id=${pane(paneId)}&workspace_id=${encodeURIComponent(workspaceId)}`;
+
   return {
     baseUrl,
 
@@ -137,6 +136,17 @@ export function createApi(baseUrl: string) {
 
     /** The build published last on the PC. 404 until the first release. */
     latestRelease: () => get<Release>('/api/app/latest'),
+
+    /** 404 when the path points at nothing, which for a path found in output is the usual case. */
+    fileMeta: (paneId: string, workspaceId: string, path: string) =>
+      get<SessionFile>(`/api/files/meta?${fileQuery(paneId, workspaceId, path)}`),
+
+    fileUrl: (paneId: string, workspaceId: string, path: string) =>
+      `${baseUrl}/api/files?${fileQuery(paneId, workspaceId, path)}`,
+
+    /** A reduced copy; `version` changes when the file does, so the image cache lets go of the old one. */
+    thumbUrl: (paneId: string, workspaceId: string, path: string, width: number, version: number) =>
+      `${baseUrl}/api/files/thumb?${fileQuery(paneId, workspaceId, path)}&w=${width}&v=${version}`,
 
     readPane: (paneId: string, lines = 120) =>
       get<{ text?: string }>(`/api/panes/${pane(paneId)}/read?lines=${lines}`),
@@ -196,7 +206,7 @@ export function createApi(baseUrl: string) {
           `${baseUrl}/api/upload`,
           { method: 'POST', body: form, headers: { Accept: 'application/json' } },
           UPLOAD_TIMEOUT,
-        ).pipe(Effect.ensuring(discardAfterUpload(staged, file.uri)));
+        ).pipe(Effect.ensuring(discardStaged(staged)));
       }),
   };
 }

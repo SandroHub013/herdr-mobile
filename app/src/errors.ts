@@ -60,6 +60,12 @@ export class InstallError extends Data.TaggedError('InstallError')<{
   readonly reason: string;
 }> {}
 
+/** Nothing on the phone would open the file, not even the share sheet. */
+export class OpenError extends Data.TaggedError('OpenError')<{
+  readonly name: string;
+  readonly reason: string;
+}> {}
+
 export type BridgeError = NetworkError | TimeoutError | HttpError | DecodeError;
 
 /** Uploading can also fail before the network is involved, on the file itself. */
@@ -68,11 +74,16 @@ export type UploadError = BridgeError | FileError;
 /** Updating fails on the network, on the package, or at the installer. */
 export type UpdateError = BridgeError | DownloadError | CorruptDownload | InstallError;
 
+/** Receiving a file from the PC fails on the download or at the app meant to open it. */
+export type ReceiveError = DownloadError | OpenError;
+
 /** Short Italian wording for the toast. Exhaustive by construction. */
-export function describeError(error: UploadError | UpdateError): string {
+export function describeError(error: UploadError | UpdateError | ReceiveError): string {
   switch (error._tag) {
     case 'FileError':
       return `file non leggibile: ${error.reason}`;
+    case 'OpenError':
+      return `${error.name} non si apre: ${error.reason}`;
     case 'DownloadError':
       return `scaricamento interrotto: ${error.reason}`;
     case 'CorruptDownload':

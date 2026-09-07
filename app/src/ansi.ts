@@ -183,6 +183,49 @@ export type LineKind = 'prose' | 'mono' | 'meta' | 'user';
 export interface OutputLine {
   readonly kind: LineKind;
   readonly segments: TextSegment[];
+  /** Files the line names by path, as written, for the bridge to resolve. */
+  readonly files: string[];
+}
+
+/**
+ * Kinds of file worth bringing to the phone when the transcript names one:
+ * images are shown, the rest offered. Source files are deliberately absent,
+ * or every edit the agent reports would come with a card.
+ */
+const IMAGE_EXTENSIONS = 'png|jpe?g|gif|webp|bmp';
+const DELIVERABLE_EXTENSIONS = 'apk|pdf|zip|7z|rar|csv|docx?|xlsx?|pptx?|mp4|mp3|m4a|wav';
+const FILE_TOKEN = new RegExp(
+  `^@?(?:[A-Za-z]:[\\\\/]|~[\\\\/]|\\.{1,2}[\\\\/])?(?:[^\\\\/<>|"'*?]+[\\\\/])*[^\\\\/<>|"'*?]+\\.(?:${IMAGE_EXTENSIONS}|${DELIVERABLE_EXTENSIONS})$`,
+  'i',
+);
+/** Something the reader attached, whatever its kind: the app itself wrote the reference. */
+const ATTACHED_TOKEN = /^@\S+\.[A-Za-z0-9]+$/;
+const TOKEN_BOUNDARY = /[\s"'`()[\]{}<>,;]+/;
+const TRAILING_STOP = /[.,:;!?]+$/;
+
+/**
+ * The file paths a line names. In the reader's own message every attachment
+ * counts; in output only the kinds listed above, since a path there is a
+ * mention, not a delivery.
+ */
+export function findFileReferences(text: string, ownMessage = false): string[] {
+  const found: string[] = [];
+  for (const raw of text.split(TOKEN_BOUNDARY)) {
+    const token = raw.replace(TRAILING_STOP, '');
+    if (!token || /^[a-z]+:\/\//i.test(token)) continue;
+    if (!FILE_TOKEN.test(token) && !(ownMessage && ATTACHED_TOKEN.test(token))) continue;
+    if (!found.includes(token)) found.push(token);
+  }
+  return found;
+}
+
+/** A sent message without its attachment references: those are shown as the files themselves. */
+function withoutAttachments(text: string): string {
+  return text
+    .split(/\s+/)
+    .filter((word) => !ATTACHED_TOKEN.test(word.replace(TRAILING_STOP, '')))
+    .join(' ')
+    .trim();
 }
 
 /**
@@ -307,5 +350,18 @@ export function segmentOutput(text: string): OutputLine[] {
     blocks.push({ kind, text: kind === 'prose' ? line.trim() : line });
   }
 
-  return blocks.map((block) => ({ kind: block.kind, segments: segmentLinks(block.text) }));
+  return blocks.map((block) => {
+    if (block.kind === 'user') {
+      return {
+        kind: block.kind,
+        segments: segmentLinks(withoutAttachments(block.text)),
+        files: findFileReferences(block.text, true),
+      };
+    }
+    return {
+      kind: block.kind,
+      segments: segmentLinks(block.text),
+      files: block.text ? findFileReferences(block.text) : [],
+    };
+  });
 }

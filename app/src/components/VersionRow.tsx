@@ -80,7 +80,7 @@ function describe(state: UpdateState, lastCheck: LastCheck | null): string {
     case 'newer':
       return `Versione ${lastCheck.release.version} disponibile`;
     case 'unreachable':
-      return `Bridge non raggiungibile · ${clock(lastCheck.at)}`;
+      return `Bridge non risponde · ${clock(lastCheck.at)}`;
   }
 }
 

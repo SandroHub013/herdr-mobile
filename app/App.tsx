@@ -2,11 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Pressable, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as DocumentPicker from 'expo-document-picker';
-import { Effect } from 'effect';
+import { Effect, Either } from 'effect';
 
 import { colors, space } from './src/theme';
-import { Attachment, isBusy, paneTitle } from './src/types';
+import { Attachment, attachmentKind, isBusy, paneTitle } from './src/types';
 import { BridgeError, describeError } from './src/errors';
+import { discardLocalCopy } from './src/files';
 import { ConnectionSettings, DEFAULT_SETTINGS, loadSettings, saveSettings } from './src/storage';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { useSystemChrome } from './src/hooks/useSystemChrome';
@@ -49,7 +50,8 @@ function HerdrApp() {
   const [history, setHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const draftRef = useRef('');
-  const [attachment, setAttachment] = useState<Attachment | null>(null);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const attachmentIdRef = useRef(0);
 
   const [sheetOpen, setSheetOpen] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
@@ -258,6 +260,12 @@ function HerdrApp() {
     [activePaneId, sendText, toast],
   );
 
+  /** The thumbnails are done with the picker's copies once the message has gone. */
+  const clearAttachments = useCallback(() => {
+    attachments.forEach((item) => discardLocalCopy(item.uri));
+    setAttachments([]);
+  }, [attachments]);
+
   const handleSend = useCallback(() => {
     const text = composerText.trim();
     if (!text) return;
@@ -274,8 +282,8 @@ function HerdrApp() {
     setComposerText('');
     setHistoryIndex(-1);
     draftRef.current = '';
-    setAttachment(null);
-  }, [activePaneId, composerText, submit, toast]);
+    clearAttachments();
+  }, [activePaneId, clearAttachments, composerText, submit, toast]);
 
   const handleKey = useCallback(
     (key: ComposerKey) => {
@@ -340,56 +348,76 @@ function HerdrApp() {
   const handleAttach = useCallback(() => {
     const program = Effect.gen(function* () {
       const result = yield* Effect.tryPromise({
-        try: () => DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, type: '*/*' }),
+        try: () => DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, type: '*/*', multiple: true }),
         catch: () => 'picker' as const,
       });
       if (result.canceled || !result.assets || result.assets.length === 0) return;
-      const picked = result.assets[0];
 
-      yield* Effect.sync(() => setAttachment({ name: picked.name, state: 'uploading' }));
+      // One upload at a time: a handful of files at most, and the references
+      // land in the composer in the order they were picked.
+      for (const picked of result.assets) {
+        const id = ++attachmentIdRef.current;
+        yield* Effect.sync(() =>
+          setAttachments((previous) => [
+            ...previous,
+            {
+              id,
+              name: picked.name,
+              uri: picked.uri,
+              kind: attachmentKind(picked.name, picked.mimeType),
+              state: 'uploading',
+            },
+          ]),
+        );
 
-      // The pane decides the upload directory, so the reference the agent reads
-      // resolves against the working directory it is actually running in.
-      const uploaded = yield* api
-        .upload(
-          { uri: picked.uri, name: picked.name, mimeType: picked.mimeType },
-          activeWorkspaceId,
-          activePaneId,
-        )
-        .pipe(Effect.tapError(() => Effect.sync(() => setAttachment({ name: picked.name, state: 'failed' }))));
+        // The pane decides the upload directory, so the reference the agent reads
+        // resolves against the working directory it is actually running in.
+        const outcome = yield* Effect.either(
+          api.upload({ uri: picked.uri, name: picked.name, mimeType: picked.mimeType }, activeWorkspaceId, activePaneId),
+        );
 
-      yield* Effect.sync(() => {
-        const reference = uploaded.rel_ref || `@${uploaded.filename}`;
-        setAttachment({ name: uploaded.filename, state: 'ready', path: uploaded.path, ref: reference });
-        setComposerText((previous) => {
-          if (previous.includes(reference)) return previous;
-          return previous.trim() ? `${previous.trim()} ${reference}` : reference;
+        yield* Effect.sync(() => {
+          if (Either.isLeft(outcome)) {
+            setAttachments((previous) =>
+              previous.map((item): Attachment => (item.id === id ? { ...item, state: 'failed' } : item)),
+            );
+            toast.show(`Caricamento non riuscito: ${describeError(outcome.left)}`);
+            return;
+          }
+          const uploaded = outcome.right;
+          const reference = uploaded.rel_ref || `@${uploaded.filename}`;
+          setAttachments((previous) =>
+            previous.map(
+              (item): Attachment =>
+                item.id === id
+                  ? { ...item, name: uploaded.filename, state: 'ready', path: uploaded.path, ref: reference }
+                  : item,
+            ),
+          );
+          setComposerText((previous) => {
+            if (previous.includes(reference)) return previous;
+            return previous.trim() ? `${previous.trim()} ${reference}` : reference;
+          });
         });
-      });
+      }
     });
 
-    Effect.runFork(
-      program.pipe(
-        Effect.catchAll((error) =>
-          Effect.sync(() => {
-            toast.show(
-              error === 'picker'
-                ? 'Selezione del file non riuscita'
-                : `Caricamento non riuscito: ${describeError(error)}`,
-            );
-          }),
-        ),
-      ),
-    );
+    Effect.runFork(program.pipe(Effect.catchAll(() => Effect.sync(() => toast.show('Selezione del file non riuscita')))));
   }, [activePaneId, activeWorkspaceId, api, toast]);
 
-  const handleRemoveAttachment = useCallback(() => {
-    const reference = attachment?.ref;
-    if (reference) {
-      setComposerText((previous) => previous.replace(reference, '').replace(/\s{2,}/g, ' ').trim());
-    }
-    setAttachment(null);
-  }, [attachment]);
+  const handleRemoveAttachment = useCallback(
+    (id: number) => {
+      const removed = attachments.find((item) => item.id === id);
+      if (!removed) return;
+      const reference = removed.ref;
+      if (reference) {
+        setComposerText((previous) => previous.replace(reference, '').replace(/\s{2,}/g, ' ').trim());
+      }
+      discardLocalCopy(removed.uri);
+      setAttachments((previous) => previous.filter((item) => item.id !== id));
+    },
+    [attachments],
+  );
 
   const handleSaveConnection = useCallback(() => {
     const host = draftHost.trim();
@@ -533,6 +561,7 @@ function HerdrApp() {
         {panesToRender.map((pane, index) => (
           <TerminalPane
             key={pane.pane_id}
+            api={api}
             pane={pane}
             index={index}
             text={paneTexts[pane.pane_id] ?? ''}
@@ -543,6 +572,7 @@ function HerdrApp() {
             onFocus={() => handleSelectPane(pane.pane_id)}
             onZoom={() => handleZoomPane(pane.pane_id)}
             onClose={() => handleClosePane(pane.pane_id)}
+            notify={toast.show}
           />
         ))}
       </View>
@@ -599,7 +629,7 @@ function HerdrApp() {
             onKey={handleKey}
             onAttach={handleAttach}
             onRemoveAttachment={handleRemoveAttachment}
-            attachment={attachment}
+            attachments={attachments}
             targetLabel={activePane ? paneTitle(activePane) : null}
             disabled={!activePaneId}
           />
