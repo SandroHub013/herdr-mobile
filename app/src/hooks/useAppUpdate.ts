@@ -15,8 +15,15 @@ import {
   ReleaseApk,
 } from '../updates';
 
-/** How long a check stays fresh. Releases are not that frequent. */
-const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+/**
+ * How long a return to the foreground trusts the last check. A connection
+ * coming up always asks: that is the moment a release published while the
+ * phone was away becomes visible, and the question costs one small request.
+ */
+const FOREGROUND_INTERVAL_MS = 5 * 60 * 1000;
+
+/** Why a check is running, which decides what it may skip and what it may undo. */
+type CheckReason = 'connect' | 'foreground' | 'manual';
 
 export type UpdateState =
   | { readonly status: 'idle' }
@@ -35,10 +42,10 @@ export type LastCheck =
 /**
  * Watches the bridge for a newer build and drives the download and install.
  *
- * A check runs when the connection comes up and when the app returns to the
- * foreground, at most once an hour; the connection dialog can ask for one at
- * any time. Nothing is downloaded until the user asks: the package is tens of
- * megabytes and the phone may be on mobile data.
+ * A check runs whenever the connection comes up, when the app returns to the
+ * foreground after a while, and whenever the connection dialog asks. Nothing
+ * is downloaded until the user asks: the package is tens of megabytes and the
+ * phone may be on mobile data.
  */
 export function useAppUpdate(api: HerdrApi, connected: boolean, notify: (message: string) => void) {
   const [state, setState] = useState<UpdateState>({ status: 'idle' });
@@ -49,14 +56,14 @@ export function useAppUpdate(api: HerdrApi, connected: boolean, notify: (message
   stateRef.current = state;
 
   const check = useCallback(
-    (force = false) => {
+    (reason: CheckReason) => {
       const now = Date.now();
-      if (!force && now - lastCheckRef.current < CHECK_INTERVAL_MS) return;
+      if (reason === 'foreground' && now - lastCheckRef.current < FOREGROUND_INTERVAL_MS) return;
       // A download in flight is not interrupted by a routine check.
       if (stateRef.current.status === 'downloading') return;
       lastCheckRef.current = now;
       // Asking by hand also forgives a dismissal: it means "show me again".
-      if (force) dismissedRef.current = null;
+      if (reason === 'manual') dismissedRef.current = null;
       setLastCheck({ status: 'checking' });
 
       // An unreachable bridge is not news for the banner, which simply stays
@@ -85,15 +92,15 @@ export function useAppUpdate(api: HerdrApi, connected: boolean, notify: (message
     [api],
   );
 
-  const checkNow = useCallback(() => check(true), [check]);
+  const checkNow = useCallback(() => check('manual'), [check]);
 
   useEffect(() => {
-    if (connected) check();
+    if (connected) check('connect');
   }, [connected, check]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (next) => {
-      if (next === 'active' && connected) check();
+      if (next === 'active' && connected) check('foreground');
     });
     return () => subscription.remove();
   }, [connected, check]);
