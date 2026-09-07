@@ -1,943 +1,730 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import {
-  StyleSheet,
-  Text,
-  View,
-  ScrollView,
-  TouchableOpacity,
-  TextInput,
-  Modal,
-  SafeAreaView,
-  StatusBar,
-  ActivityIndicator,
-  RefreshControl,
-  Dimensions,
-  Platform,
-  KeyboardAvoidingView,
-} from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { StatusBar } from 'expo-status-bar';
+import * as DocumentPicker from 'expo-document-picker';
+import { Effect } from 'effect';
 
-const { width } = Dimensions.get('window');
+import { colors, space } from './src/theme';
+import { Attachment, isBusy, paneTitle } from './src/types';
+import { BridgeError, describeError } from './src/errors';
+import { ConnectionSettings, DEFAULT_SETTINGS, loadSettings, saveSettings } from './src/storage';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { useSystemChrome } from './src/hooks/useSystemChrome';
+import { useHerdrSession } from './src/hooks/useHerdrSession';
+import { IconSinglePane, IconSplitDown, IconSplitRight } from './src/icons';
+import { EmptyState, PrimaryButton, TextButton } from './src/components/Primitives';
+import { Header } from './src/components/Header';
+import { TabBar } from './src/components/TabBar';
+import { Sidebar, collectAgents } from './src/components/Sidebar';
+import { TerminalPane } from './src/components/TerminalPane';
+import { Composer, ComposerKey } from './src/components/Composer';
+import { ActionSheet, Dialog, SheetAction, TextField } from './src/components/Overlays';
+import { Toast, useToast } from './src/components/Toast';
+import { UpdateBanner } from './src/components/UpdateBanner';
+import { useAppUpdate } from './src/hooks/useAppUpdate';
 
-// Default host address (User PC on Wi-Fi)
-const DEFAULT_HOST = '192.168.1.10';
-const DEFAULT_PORT = '43737';
+const SIDEBAR_WIDTH = 272;
+const HISTORY_LIMIT = 50;
 
-interface Workspace {
-  workspace_id: string;
-  number: number;
-  label: string;
-  focused: boolean;
-  pane_count: number;
-  tab_count: number;
-  active_tab_id: string;
-  agent_status?: string;
-}
+function HerdrApp() {
+  const chrome = useSystemChrome();
+  const toast = useToast();
 
-interface Pane {
-  pane_id: string;
-  workspace_id: string;
-  tab_id: string;
-  agent?: string;
-  agent_status?: string;
-  terminal_title?: string;
-  terminal_title_stripped?: string;
-  cwd?: string;
-}
+  const [settings, setSettings] = useState<ConnectionSettings>(() => Effect.runSync(loadSettings));
+  const session = useHerdrSession(settings.host, settings.port);
+  const { api, subscribe, refreshPane, sendText, sendKeys, submit, connected, snapshot, paneTexts } = session;
+  const { workspaces, tabs, panes } = snapshot;
+  const appUpdate = useAppUpdate(api, connected, toast.show);
 
-export default function App() {
-  const [host, setHost] = useState<string>(DEFAULT_HOST);
-  const [port, setPort] = useState<string>(DEFAULT_PORT);
-  const [connected, setConnected] = useState<boolean>(false);
-  const [activeTab, setActiveTab] = useState<'workspaces' | 'agents' | 'host'>('workspaces');
-  const [refreshing, setRefreshing] = useState<boolean>(false);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string | null>(null);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  const [activePaneId, setActivePaneId] = useState<string | null>(null);
 
-  // Data
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [panes, setPanes] = useState<Pane[]>([]);
-  const [bridgeStatus, setBridgeStatus] = useState<any>(null);
+  const [layoutMode, setLayoutMode] = useState<'single' | 'split'>('single');
+  const [wrapOutput, setWrapOutput] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // Interaction Modal (Agent / Pane)
-  const [selectedPane, setSelectedPane] = useState<Pane | null>(null);
-  const [modalVisible, setModalVisible] = useState<boolean>(false);
-  const [terminalOutput, setTerminalOutput] = useState<string>('');
-  const [promptText, setPromptText] = useState<string>('');
-  const [loadingAction, setLoadingAction] = useState<boolean>(false);
+  const [composerText, setComposerText] = useState('');
+  const [history, setHistory] = useState<string[]>([]);
+  const [historyIndex, setHistoryIndex] = useState(-1);
+  const draftRef = useRef('');
+  const [attachment, setAttachment] = useState<Attachment | null>(null);
 
-  // New Workspace Modal
-  const [newWsModalVisible, setNewWsModalVisible] = useState<boolean>(false);
-  const [newWsLabel, setNewWsLabel] = useState<string>('');
-  const [newWsCwd, setNewWsCwd] = useState<string>('');
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [spaceDialogOpen, setSpaceDialogOpen] = useState(false);
+  const [draftHost, setDraftHost] = useState(settings.host);
+  const [draftPort, setDraftPort] = useState(settings.port);
+  const [newSpaceLabel, setNewSpaceLabel] = useState('');
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const terminalScrollRef = useRef<ScrollView | null>(null);
+  const sidebarIsPermanent = chrome.isLandscape;
+  const drawerVisible = !sidebarIsPermanent && drawerOpen;
 
-  const baseUrl = `http://${host}:${port}`;
-  const wsUrl = `ws://${host}:${port}/ws`;
+  // ---------------------------------------------------------------- selection
 
-  // Connect WebSocket for live state push
-  const connectWebSocket = useCallback(() => {
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
+  const currentTabs = useMemo(
+    () => tabs.filter((tab) => tab.workspace_id === activeWorkspaceId),
+    [tabs, activeWorkspaceId],
+  );
+  const activeTabPanes = useMemo(() => panes.filter((pane) => pane.tab_id === activeTabId), [panes, activeTabId]);
+  const activeWorkspace = workspaces.find((workspace) => workspace.workspace_id === activeWorkspaceId);
+  const activePane = panes.find((pane) => pane.pane_id === activePaneId);
+  const agents = useMemo(() => collectAgents(panes, workspaces, tabs), [panes, workspaces, tabs]);
+  const busyTabIds = useMemo(() => {
+    const busy = new Set<string>();
+    panes.forEach((pane) => {
+      if (isBusy(pane.agent_status)) busy.add(pane.tab_id);
+    });
+    return busy;
+  }, [panes]);
 
-    try {
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = () => {
-        setConnected(true);
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'snapshot_update' && msg.snapshot) {
-            if (msg.snapshot.workspaces) setWorkspaces(msg.snapshot.workspaces);
-            if (msg.snapshot.panes) setPanes(msg.snapshot.panes);
-          }
-        } catch (e) {
-          console.error('Error parsing WS message:', e);
-        }
-      };
-
-      ws.onclose = () => {
-        setConnected(false);
-        // Auto-reconnect after 3s
-        setTimeout(() => {
-          connectWebSocket();
-        }, 3000);
-      };
-
-      ws.onerror = () => {
-        setConnected(false);
-      };
-    } catch (err) {
-      setConnected(false);
-    }
-  }, [wsUrl]);
-
-  // Initial fetch and WebSocket connection
-  const fetchData = async () => {
-    try {
-      setRefreshing(true);
-      const [statusRes, snapRes] = await Promise.all([
-        fetch(`${baseUrl}/api/status`).then((r) => r.json()).catch(() => null),
-        fetch(`${baseUrl}/api/snapshot`).then((r) => r.json()).catch(() => null),
-      ]);
-
-      if (statusRes) {
-        setBridgeStatus(statusRes);
-        setConnected(true);
-      }
-      if (snapRes) {
-        if (snapRes.workspaces) setWorkspaces(snapRes.workspaces);
-        if (snapRes.panes) setPanes(snapRes.panes);
-      }
-    } catch (e) {
-      setConnected(false);
-    } finally {
-      setRefreshing(false);
-    }
-  };
-
+  // Keeps the selected workspace, tab and pane pointing at something that exists,
+  // without ever overriding a choice the user just made.
   useEffect(() => {
-    fetchData();
-    connectWebSocket();
-    return () => {
-      if (wsRef.current) wsRef.current.close();
-    };
-  }, [host, port, connectWebSocket]);
+    if (workspaces.length === 0) return;
 
-  // Read terminal output of selected pane
-  const readPaneOutput = async (paneId: string) => {
-    try {
-      const res = await fetch(`${baseUrl}/api/panes/${paneId}/read?lines=60`);
-      const data = await res.json();
-      setTerminalOutput(data.text || 'Nessun output recente.');
-    } catch (e) {
-      setTerminalOutput('Errore durante la lettura dell\'output.');
+    const workspaceExists = activeWorkspaceId && workspaces.some((w) => w.workspace_id === activeWorkspaceId);
+    if (!workspaceExists) {
+      const preferred = workspaces.find((w) => w.focused) ?? workspaces[0];
+      setActiveWorkspaceId(preferred.workspace_id);
+      setActiveTabId(null);
+      setActivePaneId(null);
+      return;
     }
-  };
 
-  // Open interaction sheet
-  const openAgentInteraction = (pane: Pane) => {
-    setSelectedPane(pane);
-    setTerminalOutput('Caricamento terminale...');
-    setModalVisible(true);
-    readPaneOutput(pane.pane_id);
-  };
+    const tabsHere = tabs.filter((tab) => tab.workspace_id === activeWorkspaceId);
+    const tabExists = activeTabId && tabsHere.some((tab) => tab.tab_id === activeTabId);
+    if (!tabExists) {
+      if (tabsHere.length === 0) return;
+      const preferred = tabsHere.find((tab) => tab.focused) ?? tabsHere[0];
+      setActiveTabId(preferred.tab_id);
+      setActivePaneId(null);
+      return;
+    }
 
-  // Send prompt to pane
-  const handleSendPrompt = async (textToSend?: string) => {
-    const text = textToSend !== undefined ? textToSend : promptText;
-    if (!text.trim() || !selectedPane) return;
+    const panesHere = panes.filter((pane) => pane.tab_id === activeTabId);
+    if (panesHere.length === 0) return;
+    const paneExists = activePaneId && panesHere.some((pane) => pane.pane_id === activePaneId);
+    if (!paneExists) {
+      setActivePaneId(panesHere[0].pane_id);
+    }
+  }, [workspaces, tabs, panes, activeWorkspaceId, activeTabId, activePaneId]);
 
-    try {
-      setLoadingAction(true);
-      await fetch(`${baseUrl}/api/panes/${selectedPane.pane_id}/prompt`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+  // Stream the panes of the visible tab, and nothing else.
+  const paneIdsKey = activeTabPanes.map((pane) => pane.pane_id).join('|');
+  useEffect(() => {
+    subscribe(paneIdsKey ? paneIdsKey.split('|') : []);
+  }, [paneIdsKey, subscribe]);
+
+  // One REST read per pane as a fallback, in case the stream is slow to start.
+  const primedRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    primedRef.current = new Set();
+  }, [settings.host, settings.port]);
+  useEffect(() => {
+    if (!paneIdsKey) return;
+    paneIdsKey.split('|').forEach((paneId) => {
+      if (paneTexts[paneId] === undefined && !primedRef.current.has(paneId)) {
+        primedRef.current.add(paneId);
+        refreshPane(paneId);
+      }
+    });
+  }, [paneIdsKey, paneTexts, refreshPane]);
+
+  // Collapse back to a single pane once a split is closed.
+  useEffect(() => {
+    if (layoutMode === 'split' && activeTabPanes.length < 2) setLayoutMode('single');
+  }, [layoutMode, activeTabPanes.length]);
+
+  // ------------------------------------------------------------------ actions
+
+  // Every bridge call ends here. The error channel is a closed union, so the
+  // compiler is the thing that guarantees a failure always reaches the user.
+  const run = useCallback(
+    <A,>(description: string, action: Effect.Effect<A, BridgeError>) => {
+      Effect.runFork(
+        action.pipe(
+          Effect.catchAll((error) =>
+            Effect.sync(() => toast.show(`${description}: ${describeError(error)}`)),
+          ),
+        ),
+      );
+    },
+    [toast],
+  );
+
+  const handleSelectWorkspace = useCallback(
+    (workspaceId: string) => {
+      setActiveWorkspaceId(workspaceId);
+      setActiveTabId(null);
+      setActivePaneId(null);
+      setDrawerOpen(false);
+      run('Spazio non attivato', api.focusWorkspace(workspaceId));
+    },
+    [api, run],
+  );
+
+  const handleSelectTab = useCallback(
+    (tabId: string) => {
+      setActiveTabId(tabId);
+      setActivePaneId(null);
+      run('Scheda non attivata', api.focusTab(tabId));
+    },
+    [api, run],
+  );
+
+  const handleSelectPane = useCallback(
+    (paneId: string) => {
+      setActivePaneId(paneId);
+      refreshPane(paneId);
+      run('Finestra non attivata', api.focusPane(paneId));
+    },
+    [api, refreshPane, run],
+  );
+
+  const handleNewTab = useCallback(() => {
+    const workspaceId = activeWorkspaceId ?? workspaces[0]?.workspace_id;
+    if (!workspaceId) {
+      toast.show('Nessuno spazio in cui creare una scheda');
+      return;
+    }
+    run(
+      'Scheda non creata',
+      api.createTab(workspaceId).pipe(
+        Effect.tap((result) =>
+          Effect.sync(() => {
+            if (result?.tab?.tab_id) setActiveTabId(result.tab.tab_id);
+            if (result?.root_pane?.pane_id) setActivePaneId(result.root_pane.pane_id);
+          }),
+        ),
+      ),
+    );
+  }, [activeWorkspaceId, api, run, toast, workspaces]);
+
+  const handleSplit = useCallback(
+    (direction: 'right' | 'down') => {
+      const paneId = activePaneId ?? activeTabPanes[0]?.pane_id;
+      if (!paneId) {
+        toast.show('Nessuna finestra da dividere');
+        return;
+      }
+      run(
+        'Divisione non riuscita',
+        api.splitPane(paneId, direction).pipe(
+          Effect.tap((result) =>
+            Effect.sync(() => {
+              if (result?.pane?.pane_id) setActivePaneId(result.pane.pane_id);
+              setLayoutMode('split');
+            }),
+          ),
+        ),
+      );
+    },
+    [activePaneId, activeTabPanes, api, run, toast],
+  );
+
+  const handleClosePane = useCallback(
+    (paneId: string) => {
+      run('Finestra non chiusa', api.closePane(paneId));
+    },
+    [api, run],
+  );
+
+  const handleZoomPane = useCallback(
+    (paneId: string) => {
+      run('Zoom non riuscito', api.zoomPane(paneId));
+      setLayoutMode((previous) => (previous === 'single' ? 'split' : 'single'));
+    },
+    [api, run],
+  );
+
+  const handleCreateWorkspace = useCallback(() => {
+    const label = newSpaceLabel.trim();
+    if (!label) return;
+    setSpaceDialogOpen(false);
+    setNewSpaceLabel('');
+    run('Spazio non creato', api.createWorkspace(label));
+  }, [api, newSpaceLabel, run]);
+
+  const emit = useCallback(
+    (text: string) => {
+      if (!activePaneId) {
+        toast.show('Nessuna finestra selezionata');
+        return;
+      }
+      sendText(activePaneId, text);
+    },
+    [activePaneId, sendText, toast],
+  );
+
+  const handleSend = useCallback(() => {
+    const text = composerText.trim();
+    if (!text) return;
+    // Nothing leaves the composer until there is somewhere for it to go: the
+    // draft used to be wiped even when the send was refused for lack of a pane.
+    if (!activePaneId) {
+      toast.show('Nessuna finestra selezionata');
+      return;
+    }
+    submit(activePaneId, text);
+    setHistory((previous) =>
+      previous[previous.length - 1] === text ? previous : [...previous, text].slice(-HISTORY_LIMIT),
+    );
+    setComposerText('');
+    setHistoryIndex(-1);
+    draftRef.current = '';
+    setAttachment(null);
+  }, [activePaneId, composerText, submit, toast]);
+
+  const handleKey = useCallback(
+    (key: ComposerKey) => {
+      switch (key) {
+        case 'escape': {
+          if (!activePaneId) {
+            toast.show('Nessuna finestra selezionata');
+            return;
+          }
+          const paneId = activePaneId;
+          run(
+            'Interruzione non riuscita',
+            api.interruptPane(paneId).pipe(Effect.tap(() => Effect.sync(() => refreshPane(paneId)))),
+          );
+          return;
+        }
+        case 'ctrl-c':
+          emit('\x03');
+          return;
+        case 'enter':
+          // A real key event, not a "\r" in the text stream: see submit.
+          if (activePaneId) sendKeys(activePaneId, ['Enter']);
+          else toast.show('Nessuna finestra selezionata');
+          return;
+        case 'tab':
+          emit('\t');
+          return;
+        case 'clear':
+          if (activePaneId) submit(activePaneId, 'clear');
+          else toast.show('Nessuna finestra selezionata');
+          return;
+        case 'history-prev': {
+          if (history.length === 0) return;
+          if (historyIndex === -1) {
+            draftRef.current = composerText;
+            const next = history.length - 1;
+            setHistoryIndex(next);
+            setComposerText(history[next]);
+          } else if (historyIndex > 0) {
+            const next = historyIndex - 1;
+            setHistoryIndex(next);
+            setComposerText(history[next]);
+          }
+          return;
+        }
+        case 'history-next': {
+          if (historyIndex === -1) return;
+          if (historyIndex < history.length - 1) {
+            const next = historyIndex + 1;
+            setHistoryIndex(next);
+            setComposerText(history[next]);
+          } else {
+            setHistoryIndex(-1);
+            setComposerText(draftRef.current);
+          }
+        }
+      }
+    },
+    [activePaneId, api, composerText, emit, history, historyIndex, refreshPane, run, sendKeys, submit, toast],
+  );
+
+  const handleAttach = useCallback(() => {
+    const program = Effect.gen(function* () {
+      const result = yield* Effect.tryPromise({
+        try: () => DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, type: '*/*' }),
+        catch: () => 'picker' as const,
       });
-      if (textToSend === undefined) setPromptText('');
-      setTimeout(() => {
-        readPaneOutput(selectedPane.pane_id);
-        setLoadingAction(false);
-      }, 700);
-    } catch (e) {
-      setLoadingAction(false);
-    }
-  };
+      if (result.canceled || !result.assets || result.assets.length === 0) return;
+      const picked = result.assets[0];
 
-  // Send special keys (Ctrl+C, Enter, etc.)
-  const handleSendKeys = async (keys: string[]) => {
-    if (!selectedPane) return;
-    try {
-      await fetch(`${baseUrl}/api/panes/${selectedPane.pane_id}/send-keys`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys }),
+      yield* Effect.sync(() => setAttachment({ name: picked.name, state: 'uploading' }));
+
+      // The pane decides the upload directory, so the reference the agent reads
+      // resolves against the working directory it is actually running in.
+      const uploaded = yield* api
+        .upload(
+          { uri: picked.uri, name: picked.name, mimeType: picked.mimeType },
+          activeWorkspaceId,
+          activePaneId,
+        )
+        .pipe(Effect.tapError(() => Effect.sync(() => setAttachment({ name: picked.name, state: 'failed' }))));
+
+      yield* Effect.sync(() => {
+        const reference = uploaded.rel_ref || `@${uploaded.filename}`;
+        setAttachment({ name: uploaded.filename, state: 'ready', path: uploaded.path, ref: reference });
+        setComposerText((previous) => {
+          if (previous.includes(reference)) return previous;
+          return previous.trim() ? `${previous.trim()} ${reference}` : reference;
+        });
       });
-      setTimeout(() => readPaneOutput(selectedPane.pane_id), 400);
-    } catch (e) {}
-  };
+    });
 
-  // Focus a workspace on the PC
-  const handleFocusWorkspace = async (workspaceId: string) => {
-    try {
-      await fetch(`${baseUrl}/api/workspaces/${workspaceId}/focus`, { method: 'POST' });
-    } catch (e) {}
-  };
+    Effect.runFork(
+      program.pipe(
+        Effect.catchAll((error) =>
+          Effect.sync(() => {
+            toast.show(
+              error === 'picker'
+                ? 'Selezione del file non riuscita'
+                : `Caricamento non riuscito: ${describeError(error)}`,
+            );
+          }),
+        ),
+      ),
+    );
+  }, [activePaneId, activeWorkspaceId, api, toast]);
 
-  // Create new workspace
-  const handleCreateWorkspace = async () => {
-    if (!newWsLabel.trim()) return;
-    try {
-      await fetch(`${baseUrl}/api/workspaces`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          label: newWsLabel.trim(),
-          cwd: newWsCwd.trim() || undefined,
-          focus: true,
-        }),
+  const handleRemoveAttachment = useCallback(() => {
+    const reference = attachment?.ref;
+    if (reference) {
+      setComposerText((previous) => previous.replace(reference, '').replace(/\s{2,}/g, ' ').trim());
+    }
+    setAttachment(null);
+  }, [attachment]);
+
+  const handleSaveConnection = useCallback(() => {
+    const host = draftHost.trim();
+    const port = draftPort.trim() || DEFAULT_SETTINGS.port;
+    if (!host) return;
+    const next = { host, port };
+    setSettings(next);
+    Effect.runFork(saveSettings(next));
+    setActiveWorkspaceId(null);
+    setActiveTabId(null);
+    setActivePaneId(null);
+    setConnectionOpen(false);
+  }, [draftHost, draftPort]);
+
+  const openConnection = useCallback(() => {
+    setDraftHost(settings.host);
+    setDraftPort(settings.port);
+    setConnectionOpen(true);
+  }, [settings]);
+
+  // ------------------------------------------------------------------ render
+
+  const panesToRender = useMemo(() => {
+    if (layoutMode === 'split' && activeTabPanes.length > 1) return activeTabPanes;
+    if (activePane) return [activePane];
+    return activeTabPanes.slice(0, 1);
+  }, [activePane, activeTabPanes, layoutMode]);
+
+  const sheetActions: SheetAction[] = useMemo(() => {
+    const actions: SheetAction[] = [
+      {
+        key: 'split-right',
+        label: 'Dividi a destra',
+        icon: <IconSplitRight size={16} color={colors.textMuted} />,
+        onPress: () => handleSplit('right'),
+      },
+      {
+        key: 'split-down',
+        label: 'Dividi in basso',
+        icon: <IconSplitDown size={16} color={colors.textMuted} />,
+        onPress: () => handleSplit('down'),
+      },
+    ];
+
+    if (activeTabPanes.length > 1) {
+      actions.push({
+        key: 'layout',
+        label: layoutMode === 'split' ? 'Mostra una finestra' : 'Mostra tutte le finestre',
+        detail: `${activeTabPanes.length} finestre in questa scheda`,
+        icon:
+          layoutMode === 'split' ? (
+            <IconSinglePane size={16} color={colors.textMuted} />
+          ) : (
+            <IconSplitRight size={16} color={colors.textMuted} />
+          ),
+        onPress: () => setLayoutMode(layoutMode === 'split' ? 'single' : 'split'),
       });
-      setNewWsLabel('');
-      setNewWsCwd('');
-      setNewWsModalVisible(false);
-      fetchData();
-    } catch (e) {}
+    }
+
+    if (activePaneId && activeTabPanes.length > 1) {
+      actions.push({
+        key: 'close-pane',
+        label: 'Chiudi questa finestra',
+        destructive: true,
+        onPress: () => handleClosePane(activePaneId),
+      });
+    }
+
+    if (activeTabId) {
+      actions.push({
+        key: 'close-tab',
+        label: 'Chiudi la scheda',
+        destructive: true,
+        onPress: () => run('Scheda non chiusa', api.closeTab(activeTabId)),
+      });
+    }
+
+    actions.push({
+      key: 'connection',
+      label: 'Connessione',
+      detail: `${settings.host}:${settings.port}`,
+      onPress: openConnection,
+    });
+
+    return actions;
+  }, [
+    activePaneId,
+    activeTabId,
+    activeTabPanes.length,
+    api,
+    handleClosePane,
+    handleSplit,
+    layoutMode,
+    openConnection,
+    run,
+    settings,
+  ]);
+
+  const sidebar = (
+    <Sidebar
+      workspaces={workspaces}
+      activeWorkspaceId={activeWorkspaceId}
+      agents={agents}
+      onSelectWorkspace={handleSelectWorkspace}
+      onSelectAgent={(entry) => {
+        setActiveWorkspaceId(entry.pane.workspace_id);
+        setActiveTabId(entry.pane.tab_id);
+        setActivePaneId(entry.pane.pane_id);
+        setDrawerOpen(false);
+        run('Agente non attivato', api.focusPane(entry.pane.pane_id));
+      }}
+      onNewWorkspace={() => {
+        setDrawerOpen(false);
+        setNewSpaceLabel('');
+        setSpaceDialogOpen(true);
+      }}
+      onClose={sidebarIsPermanent ? undefined : () => setDrawerOpen(false)}
+    />
+  );
+
+  const hasPanes = panesToRender.length > 0;
+
+  const content = () => {
+    if (!connected && workspaces.length === 0) {
+      return (
+        <EmptyState
+          title="Non connesso a Herdr"
+          detail={`Nessuna risposta da ${settings.host}:${settings.port}. Verifica che il bridge sia in esecuzione sul PC.`}
+          action={<PrimaryButton label="Configura la connessione" onPress={openConnection} />}
+        />
+      );
+    }
+    if (workspaces.length === 0) {
+      return <EmptyState title="Nessuno spazio aperto" detail="Crea uno spazio dal pannello laterale." />;
+    }
+    if (!hasPanes) {
+      return <EmptyState title="Nessuna finestra in questa scheda" detail="Aprine una dal menu della scheda." />;
+    }
+    return (
+      <View style={[styles.panes, layoutMode === 'split' && (chrome.isLandscape ? styles.splitRow : styles.splitColumn)]}>
+        {panesToRender.map((pane, index) => (
+          <TerminalPane
+            key={pane.pane_id}
+            pane={pane}
+            index={index}
+            text={paneTexts[pane.pane_id] ?? ''}
+            focused={pane.pane_id === activePaneId}
+            showControls={activeTabPanes.length > 1}
+            wrap={wrapOutput}
+            onToggleWrap={() => setWrapOutput((previous) => !previous)}
+            onFocus={() => handleSelectPane(pane.pane_id)}
+            onZoom={() => handleZoomPane(pane.pane_id)}
+            onClose={() => handleClosePane(pane.pane_id)}
+          />
+        ))}
+      </View>
+    );
   };
 
-  const agentPanes = panes.filter((p) => p.agent || p.terminal_title_stripped);
-
-  const getStatusBadge = (status?: string) => {
-    const s = (status || 'unknown').toLowerCase();
-    if (s === 'working') {
-      return <View style={[styles.badge, styles.badgeWorking]}><Text style={styles.badgeTextWorking}>WORKING</Text></View>;
-    }
-    if (s === 'blocked') {
-      return <View style={[styles.badge, styles.badgeBlocked]}><Text style={styles.badgeTextBlocked}>BLOCKED</Text></View>;
-    }
-    if (s === 'idle' || s === 'done') {
-      return <View style={[styles.badge, styles.badgeIdle]}><Text style={styles.badgeTextIdle}>IDLE</Text></View>;
-    }
-    return <View style={[styles.badge, styles.badgeUnknown]}><Text style={styles.badgeTextUnknown}>{s.toUpperCase()}</Text></View>;
-  };
+  const bottomPadding = chrome.keyboardVisible ? chrome.keyboardOffset : chrome.bottomInset;
 
   return (
-    <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#090A0F" />
+    <View
+      style={[
+        styles.root,
+        {
+          paddingTop: chrome.topInset,
+          paddingBottom: bottomPadding,
+          paddingRight: chrome.isLandscape ? space.md : 0,
+        },
+      ]}
+    >
+      <StatusBar style="light" />
 
-      {/* Top Header */}
-      <View style={styles.header}>
-        <View style={styles.brandRow}>
-          <View style={styles.brandIcon}>
-            <Text style={styles.brandEmoji}>🦙</Text>
-          </View>
-          <View>
-            <Text style={styles.brandTitle}>Herdr Mobile</Text>
-            <Text style={styles.brandSub}>Remote Companion</Text>
-          </View>
+      <View style={styles.shell}>
+        {sidebarIsPermanent ? <View style={styles.sidebarColumn}>{sidebar}</View> : null}
+
+        <View style={styles.main}>
+          <Header
+            title={activeWorkspace ? activeWorkspace.label : 'Herdr'}
+            branch={activeWorkspace?.git_branch}
+            connected={connected}
+            showMenuButton={!sidebarIsPermanent}
+            onOpenMenu={() => setDrawerOpen(true)}
+            onOpenConnection={openConnection}
+          />
+
+          <UpdateBanner state={appUpdate.state} onUpdate={appUpdate.update} onDismiss={appUpdate.dismiss} />
+
+          {currentTabs.length > 0 ? (
+            <TabBar
+              tabs={currentTabs}
+              activeTabId={activeTabId}
+              busyTabIds={busyTabIds}
+              onSelect={handleSelectTab}
+              onNewTab={handleNewTab}
+              onOpenMenu={() => setSheetOpen(true)}
+            />
+          ) : null}
+
+          {content()}
+
+          <Composer
+            value={composerText}
+            onChangeText={setComposerText}
+            onSend={handleSend}
+            onKey={handleKey}
+            onAttach={handleAttach}
+            onRemoveAttachment={handleRemoveAttachment}
+            attachment={attachment}
+            targetLabel={activePane ? paneTitle(activePane) : null}
+            disabled={!activePaneId}
+          />
         </View>
-        <View style={[styles.statusPill, connected ? styles.statusConnected : styles.statusDisconnected]}>
-          <View style={[styles.statusDot, connected ? styles.dotConnected : styles.dotDisconnected]} />
-          <Text style={[styles.statusText, connected ? styles.textConnected : styles.textDisconnected]}>
-            {connected ? 'ONLINE' : 'OFFLINE'}
-          </Text>
-        </View>
+
+        {drawerVisible ? (
+          <>
+            <Pressable
+              style={styles.scrim}
+              accessibilityLabel="Chiudi il pannello"
+              onPress={() => setDrawerOpen(false)}
+            />
+            <View style={[styles.drawer, { width: Math.min(SIDEBAR_WIDTH, chrome.width * 0.84) }]}>{sidebar}</View>
+          </>
+        ) : null}
       </View>
 
-      {/* Main Content Area */}
-      <ScrollView
-        style={styles.content}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={fetchData} tintColor="#00D2FF" />}
+      <ActionSheet
+        visible={sheetOpen}
+        title="Scheda e finestre"
+        actions={sheetActions}
+        bottomInset={chrome.bottomInset}
+        onClose={() => setSheetOpen(false)}
+      />
+
+      <Dialog
+        visible={connectionOpen}
+        title="Connessione"
+        onClose={() => setConnectionOpen(false)}
+        footer={
+          <>
+            <TextButton label="Annulla" onPress={() => setConnectionOpen(false)} />
+            <PrimaryButton label="Salva" onPress={handleSaveConnection} />
+          </>
+        }
       >
-        {/* SPACES TAB */}
-        {activeTab === 'workspaces' && (
-          <View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Workspaces ({workspaces.length})</Text>
-              <TouchableOpacity style={styles.btnPrimarySmall} onPress={() => setNewWsModalVisible(true)}>
-                <Text style={styles.btnPrimarySmallText}>+ Nuovo Space</Text>
-              </TouchableOpacity>
-            </View>
+        <TextField label="Host" value={draftHost} onChangeText={setDraftHost} placeholder="192.168.1.10" />
+        <TextField
+          label="Porta"
+          value={draftPort}
+          onChangeText={setDraftPort}
+          placeholder={DEFAULT_SETTINGS.port}
+          keyboardType="numeric"
+        />
+      </Dialog>
 
-            {workspaces.map((ws) => (
-              <TouchableOpacity
-                key={ws.workspace_id}
-                style={[styles.card, ws.focused && styles.cardFocused]}
-                onPress={() => handleFocusWorkspace(ws.workspace_id)}
-                activeOpacity={0.8}
-              >
-                <View style={styles.cardTop}>
-                  <Text style={styles.cardTitle}>
-                    {ws.focused ? '⭐ ' : ''}{ws.label}
-                  </Text>
-                  {getStatusBadge(ws.agent_status)}
-                </View>
-                <View style={styles.cardMeta}>
-                  <Text style={styles.metaItem}>#️⃣ Spazio: {ws.number}</Text>
-                  <Text style={styles.metaItem}>📑 Tabs: {ws.tab_count}</Text>
-                  <Text style={styles.metaItem}>🔲 Riquadri: {ws.pane_count}</Text>
-                </View>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
+      <Dialog
+        visible={spaceDialogOpen}
+        title="Nuovo spazio"
+        onClose={() => setSpaceDialogOpen(false)}
+        footer={
+          <>
+            <TextButton label="Annulla" onPress={() => setSpaceDialogOpen(false)} />
+            <PrimaryButton label="Crea" onPress={handleCreateWorkspace} disabled={!newSpaceLabel.trim()} />
+          </>
+        }
+      >
+        <TextField
+          label="Nome"
+          value={newSpaceLabel}
+          onChangeText={setNewSpaceLabel}
+          placeholder="backend, web, docs"
+          autoFocus
+        />
+      </Dialog>
 
-        {/* AGENTS TAB */}
-        {activeTab === 'agents' && (
-          <View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Agenti Attivi ({agentPanes.length})</Text>
-              <TouchableOpacity style={styles.chip} onPress={fetchData}>
-                <Text style={styles.chipText}>🔄 Aggiorna</Text>
-              </TouchableOpacity>
-            </View>
+      <Toast message={toast.message} top={chrome.topInset + 8} />
+    </View>
+  );
+}
 
-            {agentPanes.length === 0 ? (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyStateText}>Nessun agente attivo nei workspace.</Text>
-              </View>
-            ) : (
-              agentPanes.map((p) => {
-                const name = p.agent || p.terminal_title_stripped || 'Shell';
-                return (
-                  <View key={p.pane_id} style={styles.card}>
-                    <View style={styles.cardTop}>
-                      <Text style={styles.cardTitle}>🤖 {name}</Text>
-                      {getStatusBadge(p.agent_status)}
-                    </View>
-                    {p.terminal_title_stripped && (
-                      <Text style={styles.agentSub} numberOfLines={1}>
-                        {p.terminal_title_stripped}
-                      </Text>
-                    )}
-                    <View style={styles.cardMeta}>
-                      <Text style={styles.metaItem}>🔲 Pane: {p.pane_id}</Text>
-                      <Text style={styles.metaItem}>
-                        📁 {(p.cwd || '').split('\\').filter(Boolean).pop() || ''}
-                      </Text>
-                    </View>
-
-                    <View style={styles.agentActionsRow}>
-                      <TouchableOpacity
-                        style={[styles.btnAction, styles.btnPrompt]}
-                        onPress={() => openAgentInteraction(p)}
-                      >
-                        <Text style={styles.btnPromptText}>💬 Invia Prompt</Text>
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={[styles.btnAction, styles.btnInterrupt]}
-                        onPress={() => {
-                          setSelectedPane(p);
-                          handleSendKeys(['ctrl+c']);
-                        }}
-                      >
-                        <Text style={styles.btnInterruptText}>🛑 Stop (Ctrl+C)</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                );
-              })
-            )}
-          </View>
-        )}
-
-        {/* HOST PC SETTINGS TAB */}
-        {activeTab === 'host' && (
-          <View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Configurazione Host PC</Text>
-            </View>
-
-            <View style={styles.card}>
-              <Text style={styles.cardTitle}>💻 Connessione Bridge Daemon</Text>
-              <Text style={styles.inputLabel}>Indirizzo IP del PC (Wi-Fi):</Text>
-              <TextInput
-                style={styles.input}
-                value={host}
-                onChangeText={setHost}
-                placeholder="192.168.1.10"
-                placeholderTextColor="#555"
-              />
-
-              <Text style={styles.inputLabel}>Porta:</Text>
-              <TextInput
-                style={styles.input}
-                value={port}
-                onChangeText={setPort}
-                placeholder="43737"
-                placeholderTextColor="#555"
-                keyboardType="numeric"
-              />
-
-              <TouchableOpacity style={styles.btnPrimary} onPress={fetchData}>
-                <Text style={styles.btnPrimaryText}>Riconnetti al PC</Text>
-              </TouchableOpacity>
-            </View>
-
-            {bridgeStatus && (
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>ℹ️ Info Sistema</Text>
-                <View style={styles.cardMetaCol}>
-                  <Text style={styles.metaItem}>Versione Bridge: {bridgeStatus.bridge_version}</Text>
-                  <Text style={styles.metaItem}>Herdr Socket: {bridgeStatus.herdr_alive ? '🟢 Connesso' : '🔴 Non trovato'}</Text>
-                  <Text style={styles.metaItem}>Client WS attivi: {bridgeStatus.ws_clients}</Text>
-                </View>
-              </View>
-            )}
-          </View>
-        )}
-      </ScrollView>
-
-      {/* Bottom Navigation Bar */}
-      <View style={styles.tabBar}>
-        <TouchableOpacity
-          style={[styles.tabBtn, activeTab === 'workspaces' && styles.tabBtnActive]}
-          onPress={() => setActiveTab('workspaces')}
-        >
-          <Text style={styles.tabEmoji}>🧭</Text>
-          <Text style={[styles.tabText, activeTab === 'workspaces' && styles.tabTextActive]}>Spaces</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tabBtn, activeTab === 'agents' && styles.tabBtnActive]}
-          onPress={() => setActiveTab('agents')}
-        >
-          <Text style={styles.tabEmoji}>⚡</Text>
-          <Text style={[styles.tabText, activeTab === 'agents' && styles.tabTextActive]}>Agenti</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={[styles.tabBtn, activeTab === 'host' && styles.tabBtnActive]}
-          onPress={() => setActiveTab('host')}
-        >
-          <Text style={styles.tabEmoji}>⚙️</Text>
-          <Text style={[styles.tabText, activeTab === 'host' && styles.tabTextActive]}>Host PC</Text>
-        </TouchableOpacity>
-      </View>
-
-      {/* MODAL: Interaction Sheet for Agent */}
-      <Modal visible={modalVisible} animationType="slide" transparent onRequestClose={() => setModalVisible(false)}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.modalOverlay}
-        >
-          <View style={styles.modalSheet}>
-            <View style={styles.modalHeader}>
-              <View>
-                <Text style={styles.modalTitle}>
-                  {selectedPane?.agent || selectedPane?.terminal_title_stripped || 'Agente'}
-                </Text>
-                <Text style={styles.modalSub}>ID: {selectedPane?.pane_id}</Text>
-              </View>
-              <TouchableOpacity onPress={() => setModalVisible(false)}>
-                <Text style={styles.closeBtn}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Terminal output box */}
-            <ScrollView
-              ref={terminalScrollRef}
-              style={styles.terminalBox}
-              contentContainerStyle={{ padding: 10 }}
-              onContentSizeChange={() => terminalScrollRef.current?.scrollToEnd({ animated: true })}
-            >
-              <Text style={styles.terminalText}>{terminalOutput}</Text>
-            </ScrollView>
-
-            {/* Quick response chips */}
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipsRow}>
-              <TouchableOpacity style={styles.chip} onPress={() => handleSendKeys(['enter'])}>
-                <Text style={styles.chipText}>↵ Invio</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.chip} onPress={() => handleSendKeys(['ctrl+c'])}>
-                <Text style={styles.chipText}>🛑 Ctrl+C</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.chip} onPress={() => handleSendPrompt('y')}>
-                <Text style={styles.chipText}>✅ yes (y)</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.chip} onPress={() => handleSendPrompt('n')}>
-                <Text style={styles.chipText}>❌ no (n)</Text>
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.chip} onPress={() => handleSendPrompt('proceed')}>
-                <Text style={styles.chipText}>▶ proceed</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.chip}
-                onPress={() => selectedPane && readPaneOutput(selectedPane.pane_id)}
-              >
-                <Text style={styles.chipText}>🔄 Aggiorna</Text>
-              </TouchableOpacity>
-            </ScrollView>
-
-            {/* Input row */}
-            <View style={styles.promptInputRow}>
-              <TextInput
-                style={styles.promptInput}
-                value={promptText}
-                onChangeText={setPromptText}
-                placeholder="Invia prompt o comando..."
-                placeholderTextColor="#666"
-                onSubmitEditing={() => handleSendPrompt()}
-              />
-              <TouchableOpacity style={styles.btnSend} onPress={() => handleSendPrompt()}>
-                {loadingAction ? (
-                  <ActivityIndicator size="small" color="#000" />
-                ) : (
-                  <Text style={styles.btnSendText}>Invia</Text>
-                )}
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
-
-      {/* MODAL: New Workspace */}
-      <Modal visible={newWsModalVisible} animationType="fade" transparent onRequestClose={() => setNewWsModalVisible(false)}>
-        <View style={styles.modalOverlay}>
-          <View style={[styles.modalSheet, { maxHeight: 340 }]}>
-            <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Crea Nuovo Workspace</Text>
-              <TouchableOpacity onPress={() => setNewWsModalVisible(false)}>
-                <Text style={styles.closeBtn}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            <Text style={styles.inputLabel}>Nome Workspace:</Text>
-            <TextInput
-              style={styles.input}
-              value={newWsLabel}
-              onChangeText={setNewWsLabel}
-              placeholder="Es. MobileProject"
-              placeholderTextColor="#555"
-            />
-
-            <Text style={styles.inputLabel}>Cartella sul PC (opzionale):</Text>
-            <TextInput
-              style={styles.input}
-              value={newWsCwd}
-              onChangeText={setNewWsCwd}
-              placeholder="Default: C:\Users\nome\Favorites"
-              placeholderTextColor="#555"
-            />
-
-            <TouchableOpacity style={styles.btnPrimary} onPress={handleCreateWorkspace}>
-              <Text style={styles.btnPrimaryText}>Crea Space</Text>
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
+/** The provider has to sit above every hook that asks for the insets. */
+export default function App() {
+  return (
+    <SafeAreaProvider>
+      <HerdrApp />
+    </SafeAreaProvider>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  root: {
     flex: 1,
-    backgroundColor: '#090A0F',
+    backgroundColor: colors.background,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#1F2433',
-    backgroundColor: '#0E111A',
-  },
-  brandRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  brandIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: '#00D2FF',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  brandEmoji: {
-    fontSize: 18,
-  },
-  brandTitle: {
-    color: '#FFF',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  brandSub: {
-    color: '#717D96',
-    fontSize: 11,
-  },
-  statusPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 99,
-  },
-  statusConnected: {
-    backgroundColor: 'rgba(16, 185, 129, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.3)',
-  },
-  statusDisconnected: {
-    backgroundColor: 'rgba(239, 68, 68, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
-  },
-  statusDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-  },
-  dotConnected: {
-    backgroundColor: '#10B981',
-  },
-  dotDisconnected: {
-    backgroundColor: '#EF4444',
-  },
-  statusText: {
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  textConnected: {
-    color: '#10B981',
-  },
-  textDisconnected: {
-    color: '#EF4444',
-  },
-  content: {
+  shell: {
     flex: 1,
-    padding: 16,
-  },
-  sectionHeader: {
     flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 12,
   },
-  sectionTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#828A9E',
-    textTransform: 'uppercase',
-    letterSpacing: 0.6,
+  sidebarColumn: {
+    width: SIDEBAR_WIDTH,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: colors.border,
   },
-  btnPrimarySmall: {
-    backgroundColor: '#00D2FF',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  btnPrimarySmallText: {
-    color: '#000',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  card: {
-    backgroundColor: '#151824',
-    borderWidth: 1,
-    borderColor: '#23283B',
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 10,
-  },
-  cardFocused: {
-    borderColor: 'rgba(0, 210, 255, 0.6)',
-    backgroundColor: '#181C2C',
-  },
-  cardTop: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 6,
-  },
-  cardTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: '#FFF',
+  main: {
     flex: 1,
   },
-  agentSub: {
-    fontSize: 13,
-    color: '#CBD5E1',
-    marginBottom: 6,
+  panes: {
+    flex: 1,
+    paddingHorizontal: space.md,
+    paddingBottom: space.xs,
+    gap: space.sm,
   },
-  cardMeta: {
+  splitRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    marginTop: 4,
   },
-  cardMetaCol: {
+  splitColumn: {
     flexDirection: 'column',
-    gap: 6,
-    marginTop: 8,
   },
-  metaItem: {
-    fontSize: 12,
-    color: '#828A9E',
-    fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace',
+  scrim: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.scrim,
+    zIndex: 10,
   },
-  badge: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 6,
-  },
-  badgeWorking: {
-    backgroundColor: 'rgba(0, 210, 255, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 210, 255, 0.4)',
-  },
-  badgeTextWorking: {
-    color: '#00D2FF',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  badgeBlocked: {
-    backgroundColor: 'rgba(245, 158, 11, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(245, 158, 11, 0.4)',
-  },
-  badgeTextBlocked: {
-    color: '#F59E0B',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  badgeIdle: {
-    backgroundColor: 'rgba(16, 185, 129, 0.15)',
-    borderWidth: 1,
-    borderColor: 'rgba(16, 185, 129, 0.4)',
-  },
-  badgeTextIdle: {
-    color: '#10B981',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  badgeUnknown: {
-    backgroundColor: 'rgba(130, 138, 158, 0.15)',
-  },
-  badgeTextUnknown: {
-    color: '#828A9E',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  agentActionsRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 12,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(255, 255, 255, 0.06)',
-  },
-  btnAction: {
-    flex: 1,
-    paddingVertical: 8,
-    borderRadius: 8,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnPrompt: {
-    backgroundColor: 'rgba(0, 210, 255, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(0, 210, 255, 0.3)',
-  },
-  btnPromptText: {
-    color: '#00D2FF',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  btnInterrupt: {
-    backgroundColor: 'rgba(239, 68, 68, 0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(239, 68, 68, 0.3)',
-  },
-  btnInterruptText: {
-    color: '#EF4444',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  emptyState: {
-    padding: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptyStateText: {
-    color: '#717D96',
-    fontSize: 14,
-  },
-  inputLabel: {
-    color: '#A0AEC0',
-    fontSize: 12,
-    marginTop: 10,
-    marginBottom: 4,
-  },
-  input: {
-    backgroundColor: '#0A0C14',
-    borderWidth: 1,
-    borderColor: '#23283B',
-    borderRadius: 8,
-    color: '#FFF',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 14,
-  },
-  btnPrimary: {
-    backgroundColor: '#00D2FF',
-    borderRadius: 8,
-    paddingVertical: 12,
-    alignItems: 'center',
-    marginTop: 14,
-  },
-  btnPrimaryText: {
-    color: '#000',
-    fontWeight: '700',
-    fontSize: 14,
-  },
-  tabBar: {
-    flexDirection: 'row',
-    backgroundColor: '#0E111A',
-    borderTopWidth: 1,
-    borderTopColor: '#1F2433',
-    paddingVertical: 8,
-    paddingBottom: Platform.OS === 'ios' ? 24 : 8,
-  },
-  tabBtn: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  tabBtnActive: {},
-  tabEmoji: {
-    fontSize: 18,
-  },
-  tabText: {
-    fontSize: 11,
-    color: '#717D96',
-    marginTop: 2,
-    fontWeight: '600',
-  },
-  tabTextActive: {
-    color: '#00D2FF',
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    justifyContent: 'flex-end',
-  },
-  modalSheet: {
-    backgroundColor: '#121520',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 16,
-    maxHeight: '85%',
-  },
-  modalHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  modalTitle: {
-    color: '#FFF',
-    fontSize: 16,
-    fontWeight: '700',
-  },
-  modalSub: {
-    color: '#717D96',
-    fontSize: 11,
-  },
-  closeBtn: {
-    color: '#717D96',
-    fontSize: 20,
-    padding: 4,
-  },
-  terminalBox: {
-    backgroundColor: '#05060A',
-    borderWidth: 1,
-    borderColor: '#1F2433',
-    borderRadius: 10,
-    maxHeight: 220,
-    minHeight: 120,
-    marginBottom: 10,
-  },
-  terminalText: {
-    color: '#D1D5DB',
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  chipsRow: {
-    flexDirection: 'row',
-    marginBottom: 10,
-    maxHeight: 34,
-  },
-  chip: {
-    backgroundColor: '#1A1E2E',
-    borderWidth: 1,
-    borderColor: '#2B3248',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 6,
-    marginRight: 6,
-  },
-  chipText: {
-    color: '#CBD5E1',
-    fontSize: 11,
-    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
-  },
-  promptInputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  promptInput: {
-    flex: 1,
-    backgroundColor: '#0A0C14',
-    borderWidth: 1,
-    borderColor: '#2B3248',
-    borderRadius: 10,
-    color: '#FFF',
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-  },
-  btnSend: {
-    backgroundColor: '#00D2FF',
-    borderRadius: 10,
-    paddingHorizontal: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  btnSendText: {
-    color: '#000',
-    fontWeight: '700',
-    fontSize: 14,
+  drawer: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    zIndex: 20,
+    borderRightWidth: StyleSheet.hairlineWidth,
+    borderRightColor: colors.border,
+    elevation: 16,
   },
 });

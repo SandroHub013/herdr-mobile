@@ -2,18 +2,22 @@
   "expo": {
     "name": "Herdr Mobile",
     "slug": "herdr-mobile",
-    "version": "1.0.0",
-    "orientation": "portrait",
+    "version": "1.1.5",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "backgroundColor": "#090A0F",
+    "backgroundColor": "#0B0B0D",
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "package": "dev.herdr.mobile",
+      "versionCode": 7,
+      "permissions": [
+        "android.permission.REQUEST_INSTALL_PACKAGES"
+      ],
       "adaptiveIcon": {
-        "backgroundColor": "#090A0F",
+        "backgroundColor": "#0B0B0D",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
