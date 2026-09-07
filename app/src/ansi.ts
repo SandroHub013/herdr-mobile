@@ -350,18 +350,29 @@ export function segmentOutput(text: string): OutputLine[] {
     blocks.push({ kind, text: kind === 'prose' ? line.trim() : line });
   }
 
+  // A file is shown where it first comes up; later mentions stay text, or a
+  // screenshot the agent keeps referring to would repeat down the page.
+  const seen = new Set<string>();
+  const firstMentions = (files: string[]) =>
+    files.filter((file) => {
+      const key = file.replace(/^@/, '').replace(/\\/g, '/').toLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
   return blocks.map((block) => {
     if (block.kind === 'user') {
       return {
         kind: block.kind,
         segments: segmentLinks(withoutAttachments(block.text)),
-        files: findFileReferences(block.text, true),
+        files: firstMentions(findFileReferences(block.text, true)),
       };
     }
     return {
       kind: block.kind,
       segments: segmentLinks(block.text),
-      files: block.text ? findFileReferences(block.text) : [],
+      files: block.text ? firstMentions(findFileReferences(block.text)) : [],
     };
   });
 }
