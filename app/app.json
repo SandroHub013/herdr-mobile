@@ -2,7 +2,7 @@
   "expo": {
     "name": "Herdr Mobile",
     "slug": "herdr-mobile",
-    "version": "1.1.5",
+    "version": "1.1.6",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -12,7 +12,7 @@
     },
     "android": {
       "package": "dev.herdr.mobile",
-      "versionCode": 7,
+      "versionCode": 8,
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES"
       ],
