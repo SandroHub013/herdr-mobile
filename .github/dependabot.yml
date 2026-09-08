@@ -1,6 +1,6 @@
-# Le action sono bloccate a un commit preciso (vedi i workflow): Dependabot
-# propone l'aggiornamento del commit quando esce una versione nuova, e la
-# modifica passa da una pull request invece di entrare da sola.
+# The actions are pinned to a commit (see the workflows): Dependabot proposes
+# the new commit when a version comes out, and the change arrives as a pull
+# request instead of walking in on its own.
 version: 2
 updates:
   - package-ecosystem: github-actions

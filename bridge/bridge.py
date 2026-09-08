@@ -4,12 +4,16 @@ Replicates Herdr's authentic desktop TUI layout, sidebar, workspaces, tabs,
 and real-time ANSI terminal rendering with xterm.js.
 """
 
+import argparse
 import asyncio
+import hmac
 import json
 import mimetypes
 import os
 import re
+import secrets
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -17,7 +21,7 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from urllib.parse import unquote
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
@@ -104,7 +108,90 @@ class HerdrPipeClient:
 
 herdr_client = HerdrPipeClient()
 
-app = FastAPI(title="Herdr Mobile Bridge", version="2.0.0")
+app = FastAPI(title="Herdr Mobile Bridge", version="2.1.0")
+
+
+# ---------------------------------------------------------------------------
+# Access token
+# ---------------------------------------------------------------------------
+# Whoever reaches this port can type into every terminal on the PC, so the
+# network alone is not enough of a lock: every client presents a shared
+# token. It is created on first start and kept next to the signing key,
+# outside any repository; the app asks for it once in the connection panel.
+KEYS_DIR = os.environ.get("HERDR_MOBILE_KEYS") or os.path.join(os.path.expanduser("~"), ".herdr-mobile")
+TOKEN_FILE = os.path.join(KEYS_DIR, "bridge.token")
+TOKEN_HEADER = "x-herdr-token"
+# Reachable without the token: the web app shell with its static files, and
+# the release packages, which are public on GitHub anyway. A phone running a
+# build older than the token still sees the update that brings it up to date.
+PUBLIC_PATHS = frozenset({"/", "/api/app/latest", "/download/apk"})
+PUBLIC_PREFIXES = ("/static/", "/app/")
+# How long a socket may stay silent before the token is required of it.
+AUTH_GRACE_SECONDS = 3
+
+
+def load_token() -> str:
+    token = os.environ.get("HERDR_BRIDGE_TOKEN", "").strip()
+    if token:
+        return token
+    try:
+        with open(TOKEN_FILE, "r", encoding="utf-8") as f:
+            token = f.read().strip()
+        if token:
+            return token
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(24)
+    os.makedirs(KEYS_DIR, exist_ok=True)
+    with open(TOKEN_FILE, "w", encoding="utf-8") as f:
+        f.write(token + "\n")
+    return token
+
+
+BRIDGE_TOKEN = load_token()
+
+
+def token_matches(candidate: Any) -> bool:
+    return bool(candidate) and hmac.compare_digest(str(candidate).encode("utf-8"), BRIDGE_TOKEN.encode("utf-8"))
+
+
+@app.middleware("http")
+async def require_token(request: Request, call_next):
+    path = request.url.path
+    if request.method == "OPTIONS" or path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
+        return await call_next(request)
+    presented = request.headers.get(TOKEN_HEADER, "")
+    if not presented:
+        authorization = request.headers.get("authorization", "")
+        if authorization.lower().startswith("bearer "):
+            presented = authorization[7:].strip()
+    if not token_matches(presented):
+        return JSONResponse({"detail": "Token del bridge mancante o sbagliato"}, status_code=401)
+    return await call_next(request)
+
+
+async def authenticate(websocket: WebSocket) -> bool:
+    """
+    The first message on a socket must carry the token. A client that sends
+    anything else, or nothing, is told so and closed with code 4401, which the
+    app reads as "ask the user for the token".
+    """
+    try:
+        first = await asyncio.wait_for(websocket.receive_json(), timeout=AUTH_GRACE_SECONDS)
+    except asyncio.TimeoutError:
+        first = None
+    except Exception:
+        return False
+    if isinstance(first, dict) and first.get("action") == "auth" and token_matches(first.get("token")):
+        await websocket.send_json({"type": "auth_ok"})
+        return True
+    try:
+        await websocket.send_json({"type": "error", "error": "auth_required"})
+        await websocket.close(code=4401, reason="token required")
+    except Exception:
+        pass
+    return False
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -134,7 +221,7 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def connect(self, websocket: WebSocket):
-        await websocket.accept()
+        # Accepted and authenticated by the handler before it gets here.
         async with self._lock:
             self.active_connections.append(websocket)
             self.pane_subscriptions[websocket] = set()
@@ -959,6 +1046,9 @@ def interrupt_pane(pane_id: str):
 # ---------------------------------------------------------------------------
 @app.websocket("/ws")
 async def websocket_handler(websocket: WebSocket):
+    await websocket.accept()
+    if not await authenticate(websocket):
+        return
     await ws_manager.connect(websocket)
     if latest_snapshot:
         await websocket.send_json({"type": "snapshot_update", "snapshot": latest_snapshot})
@@ -1565,6 +1655,29 @@ def get_herdr_tui_page():
             }}, 100);
         }}
 
+        // The bridge wants its token on every request and as the first
+        // message on the socket. Entered once, kept in this browser.
+        const TOKEN_KEY = 'herdr.token';
+        let token = localStorage.getItem(TOKEN_KEY) || '';
+
+        function askToken(message) {{
+            const entered = prompt(message || 'Token del bridge (stampato dal bridge alla partenza):');
+            if (entered === null) return false;
+            token = entered.trim();
+            localStorage.setItem(TOKEN_KEY, token);
+            return true;
+        }}
+
+        async function apiFetch(path, init) {{
+            const headers = Object.assign({{}}, (init && init.headers) || {{}}, {{ 'X-Herdr-Token': token }});
+            const res = await fetch(path, Object.assign({{}}, init || {{}}, {{ headers }}));
+            if (res.status === 401) {{
+                localStorage.removeItem(TOKEN_KEY);
+                if (askToken('Token rifiutato dal bridge. Inseriscilo di nuovo:')) location.reload();
+            }}
+            return res;
+        }}
+
         // WebSocket Connection
         const wsUrl = `ws://${{window.location.host}}/ws`;
         let ws = null;
@@ -1573,15 +1686,17 @@ def get_herdr_tui_page():
             ws = new WebSocket(wsUrl);
 
             ws.onopen = () => {{
-                if (activePaneId) {{
-                    subscribeToPane(activePaneId);
-                }}
+                ws.send(JSON.stringify({{ action: 'auth', token }}));
             }};
 
             ws.onmessage = (event) => {{
                 try {{
                     const msg = JSON.parse(event.data);
-                    if (msg.type === 'snapshot_update') {{
+                    if (msg.type === 'auth_ok') {{
+                        if (activePaneId) {{
+                            subscribeToPane(activePaneId);
+                        }}
+                    }} else if (msg.type === 'snapshot_update') {{
                         currentSnapshot = msg.snapshot;
                         renderSpacesAndTabs();
                     }} else if (msg.type === 'terminal_data') {{
@@ -1594,7 +1709,11 @@ def get_herdr_tui_page():
                 }}
             }};
 
-            ws.onclose = () => {{
+            ws.onclose = (event) => {{
+                if (event.code === 4401) {{
+                    localStorage.removeItem(TOKEN_KEY);
+                    if (!askToken('Il bridge chiede un token:')) return;
+                }}
                 setTimeout(connectWS, 2000);
             }};
         }}
@@ -1723,13 +1842,13 @@ def get_herdr_tui_page():
             // Close sidebar on mobile
             if (window.innerWidth <= 768) toggleSidebar();
             // Tell Herdr to focus workspace
-            fetch(`/api/workspaces/${{wsId}}/focus`, {{ method: 'POST' }}).catch(() => {{}});
+            apiFetch(`/api/workspaces/${{wsId}}/focus`, {{ method: 'POST' }}).catch(() => {{}});
         }}
 
         function selectTab(tabId) {{
             activeTabId = tabId;
             renderSpacesAndTabs();
-            fetch(`/api/tabs/${{tabId}}/focus`, {{ method: 'POST' }}).catch(() => {{}});
+            apiFetch(`/api/tabs/${{tabId}}/focus`, {{ method: 'POST' }}).catch(() => {{}});
         }}
 
         function focusAgentPane(wsId, tabId, paneId) {{
@@ -1738,7 +1857,7 @@ def get_herdr_tui_page():
             subscribeToPane(paneId);
             renderSpacesAndTabs();
             if (window.innerWidth <= 768) toggleSidebar();
-            fetch(`/api/panes/${{paneId}}/focus`, {{ method: 'POST' }}).catch(() => {{}});
+            apiFetch(`/api/panes/${{paneId}}/focus`, {{ method: 'POST' }}).catch(() => {{}});
         }}
 
         function sendKey(key) {{
@@ -1753,7 +1872,7 @@ def get_herdr_tui_page():
         function createNewSpacePrompt() {{
             const name = prompt('Nome del nuovo workspace:');
             if (name) {{
-                fetch('/api/workspaces', {{
+                apiFetch('/api/workspaces', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
                     body: JSON.stringify({{ label: name, focus: true }})
@@ -1766,7 +1885,7 @@ def get_herdr_tui_page():
             if (!targetWsId) return;
 
             try {{
-                const res = await fetch('/api/tabs', {{
+                const res = await apiFetch('/api/tabs', {{
                     method: 'POST',
                     headers: {{ 'Content-Type': 'application/json' }},
                     body: JSON.stringify({{ workspace_id: targetWsId, focus: true }})
@@ -1778,7 +1897,7 @@ def get_herdr_tui_page():
                         activePaneId = data.root_pane.pane_id;
                         subscribeToPane(data.root_pane.pane_id);
                     }}
-                    const snapRes = await fetch('/api/snapshot');
+                    const snapRes = await apiFetch('/api/snapshot');
                     currentSnapshot = await snapRes.json();
                     renderSpacesAndTabs();
                 }}
@@ -1802,6 +1921,7 @@ def get_herdr_tui_page():
         // Start
         window.addEventListener('DOMContentLoaded', () => {{
             initTerminal();
+            if (!token && !askToken()) return;
             connectWS();
         }});
     </script>
@@ -1809,21 +1929,54 @@ def get_herdr_tui_page():
 </html>"""
 
 
+def tailscale_ip() -> Optional[str]:
+    """The PC's address in its tailnet, when Tailscale is installed and up."""
+    for exe in ("tailscale", r"C:\Program Files\Tailscale\tailscale.exe"):
+        try:
+            result = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        first = result.stdout.strip().splitlines()[0].strip() if result.returncode == 0 and result.stdout.strip() else ""
+        if re.fullmatch(r"\d+\.\d+\.\d+\.\d+", first):
+            return first
+    return None
+
+
+def choose_bind(args: argparse.Namespace) -> tuple:
+    """
+    Where to listen. By default only on the Tailscale address, so the local
+    network never sees the port; failing Tailscale, only on this PC. The local
+    network is served on request, with --lan.
+    """
+    if args.host:
+        return args.host, "as asked"
+    if args.lan:
+        return "0.0.0.0", "every interface, the local network included"
+    address = tailscale_ip()
+    if address:
+        return address, "Tailscale only; --lan also serves the local network"
+    return "127.0.0.1", "this PC only, Tailscale is not up; --lan serves the local network"
+
+
 def run_bridge():
-    local_ip = get_local_ip()
+    parser = argparse.ArgumentParser(description="Herdr Mobile bridge")
+    parser.add_argument("--host", help="address to listen on (default: the Tailscale address, else this PC only)")
+    parser.add_argument("--lan", action="store_true", help="listen on every interface, the local network included")
+    args = parser.parse_args()
+    host, why = choose_bind(args)
+
     print("=" * 60)
-    print("      🦙 HERDR AUTHENTIC TUI TERMINAL DAEMON")
+    print("  Herdr Mobile bridge")
     print("=" * 60)
-    print(f"  Local IP Address : http://{local_ip}:{PORT}")
-    print(f"  Localhost URL    : http://127.0.0.1:{PORT}")
-    print(f"  WebSocket Stream : ws://{local_ip}:{PORT}/ws")
-    print("=" * 60)
-    print(f"  Open http://{local_ip}:{PORT} on your phone to connect!")
+    print(f"  Listening on  http://{host}:{PORT}  ({why})")
+    print(f"  Token         {BRIDGE_TOKEN}")
+    print(f"  Token file    {TOKEN_FILE}")
+    print("  The app asks for the token once, in the connection panel.")
     print("=" * 60)
 
     uvicorn.run(
         app,
-        host="0.0.0.0",
+        host=host,
         port=PORT,
         log_level="warning",
         ws_ping_interval=10,

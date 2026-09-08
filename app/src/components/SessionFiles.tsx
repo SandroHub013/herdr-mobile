@@ -91,9 +91,11 @@ function ImageTile({
         onPress={() => setOpen(true)}
         style={({ pressed }) => [styles.tile, pressed && styles.pressed]}
       >
-        <Image source={{ uri: thumb }} style={styles.thumb} resizeMode="cover" />
+        <Image source={{ uri: thumb, headers: api.headers }} style={styles.thumb} resizeMode="cover" />
       </Pressable>
-      {open ? <ImageViewer file={file} uri={full} onClose={() => setOpen(false)} notify={notify} /> : null}
+      {open ? (
+        <ImageViewer file={file} uri={full} headers={api.headers} onClose={() => setOpen(false)} notify={notify} />
+      ) : null}
     </>
   );
 }
@@ -102,11 +104,13 @@ function ImageTile({
 function ImageViewer({
   file,
   uri,
+  headers,
   onClose,
   notify,
 }: {
   file: SessionFile;
   uri: string;
+  headers: Record<string, string>;
   onClose: () => void;
   notify: (message: string) => void;
 }) {
@@ -116,19 +120,19 @@ function ImageViewer({
   const share = useCallback(() => {
     if (busy) return;
     setBusy(true);
-    const flow = downloadFile(uri, file.name, file.size, () => undefined).pipe(
+    const flow = downloadFile(uri, file.name, file.size, () => undefined, headers).pipe(
       Effect.flatMap((saved) => shareFile(saved, file.mime)),
     );
     void Effect.runPromise(Effect.either(flow)).then((result) => {
       setBusy(false);
       if (Either.isLeft(result)) notify(describeError(result.left));
     });
-  }, [busy, file, notify, uri]);
+  }, [busy, file, headers, notify, uri]);
 
   return (
     <Modal visible animationType="fade" statusBarTranslucent navigationBarTranslucent onRequestClose={onClose}>
       <View style={styles.viewer}>
-        <Image source={{ uri }} style={styles.viewerImage} resizeMode="contain" />
+        <Image source={{ uri, headers }} style={styles.viewerImage} resizeMode="contain" />
         <View style={[styles.viewerBar, { paddingTop: insets.top + space.xs }]}>
           <IconButton accessibilityLabel="Chiudi l'immagine" onPress={onClose}>
             <IconClose size={16} color={colors.text} />
@@ -162,14 +166,14 @@ function FileCard({
   const receive = useCallback(() => {
     if (progress !== null) return;
     setProgress(0);
-    const flow = downloadFile(url, file.name, file.size, setProgress).pipe(
+    const flow = downloadFile(url, file.name, file.size, setProgress, api.headers).pipe(
       Effect.flatMap((saved) => openFile(saved, file.mime)),
     );
     void Effect.runPromise(Effect.either(flow)).then((result) => {
       setProgress(null);
       if (Either.isLeft(result)) notify(describeError(result.left));
     });
-  }, [file, notify, progress, url]);
+  }, [api.headers, file, notify, progress, url]);
 
   const percent = progress === null ? null : Math.round(progress * 100);
 

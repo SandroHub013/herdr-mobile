@@ -1,350 +1,468 @@
 # Herdr Mobile
 
-Controller remoto per **Herdr**, il gestore di workspace e agenti AI per Windows.
-Due client parlano con lo stesso daemon: un'app nativa per Android e iPhone, e
-una web app servita dal bridge.
+A remote control for [Herdr](https://github.com/herdrdev/herdr), the workspace
+and AI agent manager for Windows. From a phone you see the workspaces open on
+your PC, read the terminals as they run, send prompts and keystrokes to the
+agents, attach photos, and pull back the files they produce.
+
+Two clients talk to the same PC: a native app for Android and iPhone, and a web
+app served by the bridge for any browser.
 
 ---
 
-## Bridge
+## How it works
 
-Il daemon espone l'API REST, lo streaming WebSocket e la web app.
-
-1. Avvia il server con un doppio clic su [start_bridge.bat](start_bridge.bat).
-2. Dal browser del telefono, sulla stessa rete, apri `http://<ip-del-pc>:43737`.
-
-Il bridge dialoga con Herdr attraverso la named pipe `%APPDATA%\herdr\herdr.sock`.
-
----
-
-## App
-
-Il progetto React Native si trova in [app/](app/).
-
-Sviluppo con Expo Go:
-
-```bash
-cd app
-bun x expo start
+```
+phone ── Tailscale / LAN ──> bridge (Python, port 43737) ── named pipe ──> Herdr
 ```
 
-L'indirizzo del bridge si imposta dall'app, dal badge di stato in alto a destra,
-e viene ricordato tra un avvio e l'altro.
+- **The bridge** runs on the PC next to Herdr. It talks to Herdr through the
+  named pipe `%APPDATA%\herdr\herdr.sock` and exposes a REST API, a WebSocket
+  stream and the web app.
+- **The app** connects to the bridge with a host, a port and a token, and
+  remembers them.
+
+Nothing goes through a cloud service. The bridge listens on your Tailscale
+address by default and asks for a token on every request.
 
 ---
 
-## Installare l'app
+## Setup
 
-Ogni versione è una [release su GitHub](../../releases/latest) con due pacchetti
-e le loro impronte sha256.
+### Requirements
+
+- Windows with [Herdr](https://github.com/herdrdev/herdr) installed.
+- [Python](https://www.python.org) 3.11 or newer.
+- [Tailscale](https://tailscale.com) on the PC and on the phone. This is what
+  lets the phone reach the PC from anywhere, and what keeps everyone else out.
+  On a home network you can do without it, see `--lan` below.
+
+To build the app yourself or publish releases you also need Node 20 or newer,
+[Bun](https://bun.sh), a JDK 17 and the Android SDK, and the
+[GitHub CLI](https://cli.github.com). Nothing goes through Expo's cloud or EAS.
+
+### 1. The bridge
+
+```bash
+git clone https://github.com/SandroHub013/herdr-mobile.git
+cd herdr-mobile
+pip install -r bridge/requirements.txt
+start_bridge.bat
+```
+
+The bridge prints where it listens and the token:
+
+```
+  Listening on  http://100.x.y.z:43737  (Tailscale only; --lan also serves the local network)
+  Token         k3J9...
+  Token file    C:\Users\you\.herdr-mobile\bridge.token
+```
+
+The token is created on the first start and kept in `~/.herdr-mobile/bridge.token`
+(or in the folder named by `HERDR_MOBILE_KEYS`). Delete the file to get a new
+one, or set `HERDR_BRIDGE_TOKEN` to choose your own.
+
+| Option | Effect |
+| --- | --- |
+| none | listens on the Tailscale address only; without Tailscale, on this PC only |
+| `--lan` | listens on every interface, the home network included |
+| `--host <ip>` | listens on that address |
+
+The `.bat` passes its arguments through: `start_bridge.bat --lan`.
+
+### 2. The phone
+
+Install the app (see [Installing the app](#installing-the-app)), then tap the
+status badge in the top right corner to open the **Connessione** panel and
+enter:
+
+- **Host**: the PC's Tailscale address, the one the bridge printed.
+- **Porta**: `43737`.
+- **Token**: the token the bridge printed.
+
+The three are saved on the phone. If the bridge rejects the token, the app
+says so and offers the panel again.
+
+The web app works the same way: open `http://<host>:43737` in the phone's
+browser, enter the token once, and the browser keeps it.
+
+The app's interface is in Italian.
+
+### 3. Tailscale ACL, optional
+
+Tailscale already limits the bridge to the devices of your tailnet. If other
+people or machines share it, an ACL keeps port 43737 for your phone alone.
+In the [admin console](https://login.tailscale.com/admin/acls), assuming the
+PC is tagged `tag:pc` and the phone `tag:phone`:
+
+```json
+{
+  "acls": [
+    { "action": "accept", "src": ["tag:phone"], "dst": ["tag:pc:43737"] }
+  ]
+}
+```
+
+---
+
+## Security
+
+**What the token protects.** Every API call and the WebSocket stream: reading
+terminals, sending text and keys, opening workspaces, uploading and downloading
+files. The app sends it in the `X-Herdr-Token` header and as the first message
+on the socket; a wrong or missing token gets `401` on HTTP and close code
+`4401` on the socket. Comparison is constant-time.
+
+**What is reachable without it.** The web app shell and its static files, and
+the release packages: `/api/app/latest`, `/app/<file>`, `/download/apk`. Those
+packages are public on GitHub anyway, and keeping them open lets a phone with
+an older build see the update that brings it up to date.
+
+**Where the bridge listens.** On the Tailscale address by default, so nothing
+on the home network sees the port, and never on the Internet. `--lan` is a
+choice you make. Whoever can reach the port and knows the token can drive
+Herdr as you: type in any terminal, run any command. Treat the token like a
+password to the PC.
+
+**Files.** The bridge serves files only under your user profile or in the
+working folders of the open windows. A path that happens to appear in some
+output cannot turn the bridge into a file server for the whole disk.
+
+**Nothing private in the repository.** Signing keys, passwords, tokens,
+addresses and built packages are all outside it: `~/.herdr-mobile/` holds the
+keys, `releases/` and every `.apk` and `.ipa` are ignored, and GitHub's secret
+scanning is on. `app/android/app/debug.keystore` is the React Native template
+key, identical in every project.
+
+**Workflows.** Minimal permissions (`contents: read`, `write` only in the job
+that attaches the IPA to a release), no credentials left in the checkout,
+actions pinned to a commit rather than a moving tag, Dependabot proposing the
+bumps as pull requests, dependencies installed from the locked lockfile.
+
+**Checksums.** Every release lists the sha256 of its APK, and the IPA comes with
+a `.sha256` file next to it. The app checks the md5 of a package it downloads
+from the bridge before handing it to the installer.
+
+**iPhone.** Plain HTTP to the PC is allowed explicitly in `Info.plist`, because
+that traffic never leaves the private network.
+
+---
+
+## Installing the app
+
+Every version is a [GitHub release](../../releases/latest) with two packages
+and their sha256 checksums.
 
 ### Android
 
-Scarica `HerdrMobile-x.y.z-arm64.apk` e aprilo. La prima volta Android chiede di
-permettere l'installazione da questa origine; sopra una versione precedente si
-installa come aggiornamento, senza perdere le impostazioni. Da lì in poi l'app si
-aggiorna da sola attraverso il bridge (vedi sotto).
+Download `HerdrMobile-x.y.z-arm64.apk` and open it. The first time, Android
+asks to allow installs from this source; over a previous version it installs
+as an update and keeps the settings. From then on the app updates itself
+through the bridge, see [Releases and updates](#releases-and-updates).
 
 ### iPhone
 
-Scarica `HerdrMobile-x.y.z-ios.ipa`. Apple non permette di aprire un IPA sul
-telefono e installarlo: va firmato con un Apple ID, e la firma si fa da un
-computer.
+Download `HerdrMobile-x.y.z-ios.ipa`. Apple does not let you open an IPA on the
+phone and install it: it has to be signed with an Apple ID, from a computer.
 
-Con un Apple ID normale, gratis:
+With an ordinary Apple ID, free of charge:
 
-1. Sul computer installa [Sideloadly](https://sideloadly.io) (Windows o Mac). Su
-   Windows servono iTunes e iCloud nelle versioni scaricate dal sito Apple, non
-   quelle del Microsoft Store.
-2. Collega l'iPhone con il cavo, trascina l'IPA su Sideloadly e inserisci il tuo
-   Apple ID: serve solo a firmare, e la firma resta sul tuo computer.
-3. Sull'iPhone, in Impostazioni → Generali → VPN e gestione dispositivo, dai
-   fiducia allo sviluppatore che compare, cioè il tuo Apple ID. Se il telefono lo
-   chiede, attiva anche la Modalità sviluppatore in Privacy e sicurezza.
+1. On the computer install [Sideloadly](https://sideloadly.io) (Windows or
+   Mac). On Windows it needs iTunes and iCloud in the versions downloaded from
+   Apple's site, not the Microsoft Store ones.
+2. Plug the iPhone in, drag the IPA onto Sideloadly and enter your Apple ID.
+   It is used only to sign, and the signature stays on your computer.
+3. On the iPhone, in Settings → General → VPN & Device Management, trust the
+   developer that appears, which is your Apple ID. If the phone asks, also turn
+   on Developer Mode under Privacy & Security.
 
-L'app così firmata funziona per sette giorni, con al massimo tre app firmate in
-questo modo alla volta; ricollegando il telefono Sideloadly la rinnova, e può
-farlo da solo via Wi-Fi. Una versione nuova si installa come la prima.
-[AltStore](https://altstore.io) fa la stessa cosa.
+An app signed this way runs for seven days, with at most three such apps at a
+time; plugging the phone in again renews it, and Sideloadly can do that on its
+own over Wi-Fi. A new version installs like the first one.
+[AltStore](https://altstore.io) does the same.
 
-Con un [Apple Developer Program](https://developer.apple.com/programs/) (99 dollari
-l'anno) il workflow iOS può firmare da solo: l'IPA dura un anno, oppure va su
-TestFlight e gli amici lo installano da un link, con gli aggiornamenti automatici.
-I segreti da impostare sono elencati in [CI/CD](#cicd).
+With an [Apple Developer Program](https://developer.apple.com/programs/)
+membership (99 dollars a year) the iOS workflow can sign by itself: the IPA
+lasts a year, or goes to TestFlight and friends install it from a link, with
+automatic updates. The secrets to set are listed under [CI/CD](#cicd).
 
 ---
 
-## Release e aggiornamenti
+## Releases and updates
 
-Non c'è uno store tra il PC e il telefono: le release le pubblica lo script, il
-bridge le offre, l'app le scarica e le passa all'installatore di Android.
+There is no store between the PC and the phone: a script publishes releases,
+the bridge offers them, the app downloads them and hands them to Android's
+installer.
 
-Per pubblicare una versione:
+### Signing key, once
 
 ```bash
-node release.mjs --bump patch --notes "Cosa è cambiato"
+node release.mjs --setup-keys
 ```
 
-Lo script alza `version`, `android.versionCode` e `ios.buildNumber` in
-`app/app.json` e in `app/android/app/build.gradle` (il codice cresce di uno a ogni
-release ed è l'unico numero che l'app confronta), compila l'APK arm64 con Gradle
-in locale, lo firma con la chiave di release (vedi [Firma e sicurezza](#firma-e-sicurezza)),
-lo copia in `releases/` con nome versionato, dimensione, md5 e sha256, e scrive
-`releases/latest.json`, più lo storico in `releases/storico.json`. Se la build
-fallisce, i file di versione tornano com'erano. Con `--bump minor` o `--major`
-cambia il salto, con `--version 1.2.0` lo imposti a mano, con `--skip-build`
-ripubblichi ciò che Gradle ha già prodotto. Una sola build: i telefoni sono tutti
-arm64. L'universale serve solo all'emulatore x86 del PC e si aggiunge con
-`--varianti arm64,universale`.
+This creates `~/.herdr-mobile/release.keystore` (RSA 4096, random password)
+and `keystore.properties` next to it, which the script reads. Back that folder
+up somewhere safe: without the key no future build will install over the ones
+already on phones, and the app would have to be reinstalled from scratch.
 
-In `releases/` resta solo il pacchetto dell'ultima versione: l'app chiede sempre e
-solo quella, e ogni pacchetto pesa decine di megabyte. Con `--conserva 2` restano
-anche i due precedenti. Lo storico conserva ogni voce con le proprie impronte, così
-una build vecchia si riconosce anche dopo che il file è sparito.
+If your earlier builds were signed with another key, add a rotation lineage so
+phones accept the new key as an update. With the template debug key as the old
+signer:
 
-Ogni release finisce in un commit con il tag `v1.2.0`, e il commit viene spinto su
-GitHub insieme a una release che porta l'APK arm64 e le note: il pacchetto che gira
-su un telefono risale ai sorgenti esatti che l'hanno prodotto, e da lì si
-ricostruisce. Il commit prende tutto ciò che c'è nell'albero di lavoro, quindi si
-pubblica quando il lavoro è finito. `--no-publish` si ferma al commit e al tag;
-`--no-commit` lascia git in pace. Per la release su GitHub serve la
-[CLI `gh`](https://cli.github.com) con il login fatto. Alla pubblicazione parte il
-workflow iOS, che entro mezz'ora allega l'IPA alla stessa release.
+```bash
+apksigner rotate --out ~/.herdr-mobile/signing.lineage \
+  --old-signer --ks app/android/app/debug.keystore --ks-key-alias androiddebugkey \
+  --new-signer --ks ~/.herdr-mobile/release.keystore --ks-key-alias herdr
+```
 
-Anche `app/android/` è versionato: non è più solo generato da Expo, perché
-contiene la schermata di avvio, le icone e il permesso di installazione fatti a
-mano. `app/ios/` invece no: lo genera il runner macOS da `app.json` a ogni build.
+then add `lineage=<path to signing.lineage>` to `keystore.properties`. The
+script signs with the debug key first and the release key next, and the old
+key is granted no rollback capability: from then on a package signed only with
+the debug key is no longer accepted as an update. Android 9 and later verify
+the new key; `apksigner verify --print-certs -v` shows both signatures.
 
-Niente passa da Expo o da EAS: la build Android è Gradle sul PC, quella iOS è Xcode
-su GitHub Actions, senza limiti di piano.
+### Publishing a version
 
-Il bridge risponde su `/api/app/latest` con la descrizione dell'ultima release e su
-`/app/<file>` con il pacchetto. `/download/apk` continua a esistere e dà l'ultima
-arm64.
+```bash
+node release.mjs --bump patch --notes "What changed"
+```
 
-Sul telefono Android, ogni volta che la connessione sale, e quando l'app torna in
-primo piano se l'ultimo controllo ha più di cinque minuti, l'app chiede al bridge
-se c'è una versione con codice più alto del proprio. Se c'è, sotto l'intestazione
-compare una riga con la versione, le note e la dimensione. Niente viene scaricato
-finché non tocchi **Aggiorna**: il pacchetto è di decine di megabyte e il telefono
-può essere in rete mobile. Il pacchetto scelto è quello arm64 se è l'architettura
-principale del dispositivo, altrimenti l'universale (un emulatore x86 dichiara
-arm64 come secondaria, ma non lo esegue davvero); viene scaricato nella cache con
-la barra di avanzamento, confrontato con l'md5 pubblicato e poi aperto
-nell'installatore di sistema, che chiede conferma. La prima volta Android chiede
-anche di permettere a Herdr Mobile di installare app: è la sua regola per tutto ciò
-che non viene dallo store. **Più tardi** nasconde la riga fino al prossimo avvio.
+The script raises `version`, `android.versionCode` and `ios.buildNumber` in
+`app/app.json` and in `app/android/app/build.gradle` (the code grows by one on
+every release and is the only number the app compares), builds the arm64 APK
+with Gradle on the PC, signs it with the release key, copies it into
+`releases/` under a versioned name with size, md5 and sha256, and writes
+`releases/latest.json` plus the log in `releases/history.json`. If the build
+fails, the version files go back to what they were. `--bump minor` or `major`
+change the step, `--version 1.2.0` sets it by hand, `--skip-build` republishes
+what Gradle already built. One build: phones are all arm64. The universal
+build only serves the PC's x86 emulator and is added with
+`--variants arm64,universal`.
 
-Nel pannello **Connessione**, sotto host e porta, c'è la versione installata e
-l'esito dell'ultimo controllo: sei aggiornato e a che ora, oppure quale versione è
-disponibile, oppure che il bridge non risponde. **Cerca aggiornamenti** chiede
-subito, senza aspettare l'ora, e riporta in vista un avviso rimandato con Più
-tardi; quando c'è una versione nuova lo stesso controllo diventa **Aggiorna**. Al
-primo avvio dopo un aggiornamento l'app dice a quale versione è passata.
+Only the latest package stays in `releases/`: the app only ever asks for that
+one, and each weighs tens of megabytes. `--keep 2` keeps the two previous
+ones too. The history keeps every entry with its checksums, so an old build
+can be recognised after its file is gone.
 
-Su iPhone l'app non può installare nulla: il pannello mostra la versione e ricorda
-che le nuove arrivano da GitHub, e la riga di aggiornamento non compare mai.
+Every release becomes a commit tagged `v1.2.0`, pushed to GitHub together with
+a release carrying the arm64 APK and the notes: the package running on a phone
+traces back to the exact sources that produced it. The commit takes everything
+in the working tree, so publish when the work is done. `--no-publish` stops at
+the commit and the tag; `--no-commit` leaves git alone. The GitHub release
+needs the `gh` CLI logged in. Publishing starts the iOS workflow, which
+attaches the IPA to the same release within half an hour.
+
+`app/android/` is versioned too: it is no longer just generated by Expo,
+because it holds the hand-made splash screen, icons and install permission.
+`app/ios/` is not: the macOS runner generates it from `app.json` on every
+build.
+
+### Updates on the phone
+
+The bridge answers `/api/app/latest` with the latest release and `/app/<file>`
+with the package. `/download/apk` still exists and serves the latest arm64.
+
+On Android, every time the connection comes up, and when the app returns to
+the foreground if the last check is older than five minutes, the app asks the
+bridge whether there is a version with a higher code than its own. If so, a
+line under the header shows version, notes and size. Nothing is downloaded
+until you tap **Aggiorna**: the package is tens of megabytes and the phone may
+be on mobile data. The package chosen is the arm64 one when that is the
+device's main architecture, the universal one otherwise (an x86 emulator
+declares arm64 as secondary but does not really run it); it goes to the cache
+with a progress bar, is checked against the published md5 and then opened in
+the system installer, which asks for confirmation. The first time Android also
+asks to let Herdr Mobile install apps, its rule for anything outside the store.
+**Più tardi** hides the line until the next launch.
+
+In the **Connessione** panel, under host, port and token, the installed
+version and the outcome of the last check: up to date and since when, or which
+version is available, or that the bridge does not answer. **Cerca
+aggiornamenti** asks right away and brings back a notice dismissed with Più
+tardi; when a new version exists the same control becomes **Aggiorna**. On the
+first launch after an update the app says which version it moved to.
+
+On iPhone the app cannot install anything: the panel shows the version and
+reminds that new ones come from GitHub, and the update line never appears.
 
 ---
 
 ## CI/CD
 
-Due workflow in [.github/workflows](.github/workflows):
+Two workflows in [.github/workflows](.github/workflows):
 
-- **Controlli** (`ci.yml`), a ogni push e pull request: i tipi dell'app con
-  `tsc` e la sintassi del bridge. Niente build native qui.
-- **iOS** (`ios.yml`), alla pubblicazione di una release: su un runner macOS
-  installa le dipendenze con il lockfile bloccato, genera `app/ios/` da
-  `app.json`, installa i Pod, compila con Xcode e allega alla release l'IPA con la
-  sua impronta sha256. Lo stesso IPA resta anche come artefatto del workflow per
-  trenta giorni. Ci vogliono venti o trenta minuti. Si rilancia a mano da
-  Actions → iOS → Run workflow, indicando il tag della release a cui allegare il
-  risultato, o senza tag per avere solo l'artefatto.
+- **Checks** (`ci.yml`), on every push and pull request: the app's types with
+  `tsc` and the bridge's syntax. No native builds here.
+- **iOS** (`ios.yml`), when a release is published: on a macOS runner it
+  installs the dependencies from the locked lockfile, generates `app/ios/` from
+  `app.json`, installs the Pods, builds with Xcode and attaches the IPA with its
+  sha256 to the release. The same IPA stays as a workflow artifact for thirty
+  days. It takes twenty to thirty minutes. Run it by hand from Actions → iOS →
+  Run workflow, giving the tag of the release to attach the result to, or no
+  tag to get only the artifact.
 
-Il repository è pubblico e i runner standard sono gratuiti. Se diventasse privato,
-ogni minuto macOS vale dieci minuti del piano: duemila minuti al mese bastano per
-otto o dieci build iOS.
+The repository is public and the standard runners are free. In a private one
+each macOS minute counts ten minutes of the plan: two thousand a month cover
+eight to ten iOS builds.
 
-Senza segreti l'IPA esce non firmato. Con un Apple Developer Program si impostano
-questi segreti nel repository e la build viene firmata da Xcode, che crea da sé i
-profili:
+Without secrets the IPA comes out unsigned. With an Apple Developer Program,
+set these repository secrets and Xcode signs the build, creating the profiles
+itself:
 
-| Segreto | Contenuto |
+| Secret | Content |
 | --- | --- |
-| `IOS_CERT_P12` | certificato Apple Distribution esportato in `.p12`, in base64 |
-| `IOS_CERT_PASSWORD` | la password di quel `.p12` |
-| `IOS_TEAM_ID` | il Team ID del Developer Program |
-| `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` | una chiave API di App Store Connect (ruolo App Manager), il `.p8` in base64 |
-| `IOS_EXPORT_METHOD` | `app-store-connect` (predefinito: carica su TestFlight) oppure `ad-hoc` (allega l'IPA firmato per i dispositivi registrati) |
+| `IOS_CERT_P12` | Apple Distribution certificate exported as `.p12`, base64 |
+| `IOS_CERT_PASSWORD` | the password of that `.p12` |
+| `IOS_TEAM_ID` | the Developer Program's Team ID |
+| `ASC_KEY_ID`, `ASC_ISSUER_ID`, `ASC_KEY_P8` | an App Store Connect API key (App Manager role), the `.p8` in base64 |
+| `IOS_EXPORT_METHOD` | `app-store-connect` (default: uploads to TestFlight) or `ad-hoc` (attaches the signed IPA for registered devices) |
 
-Questa parte del workflow è predisposta ma non ancora esercitata: la prima build
-firmata è quella che la collauda.
-
----
-
-## Firma e sicurezza
-
-**La chiave Android** sta in `~/.herdr-mobile/` (oppure nella cartella indicata
-da `HERDR_MOBILE_KEYS`): `release.keystore`, `keystore.properties` con percorsi,
-alias e password, e `firma.lineage`. Nulla di questo è nel repository, e
-`release.mjs` si rifiuta di partire se non la trova. Va salvata altrove, con
-cura: senza quella chiave nessuna build futura verrebbe accettata dai telefoni
-come aggiornamento, e l'app andrebbe reinstallata da zero.
-
-**La rotazione.** Fino alla 1.1.10 i pacchetti erano firmati con la chiave di
-debug del template React Native, che è pubblica. Dalla 1.2.0 la firma è la chiave
-propria, e il pacchetto porta la catena di rotazione: Android 9 e successivi
-verificano la chiave nuova e accettano l'aggiornamento sopra una build vecchia,
-mentre un pacchetto firmato solo con la chiave di debug non viene più accettato
-come aggiornamento, perché alla vecchia chiave non è concessa la capacità di
-rollback. `apksigner verify --print-certs -v` mostra entrambe le firme.
-
-**Nel repository pubblico non ci sono** chiavi, password, indirizzi, né i
-pacchetti compilati: `releases/` e ogni `.apk` e `.ipa` sono ignorati.
-`app/android/app/debug.keystore` è quello del template, identico in ogni progetto
-React Native. GitHub tiene attivo il secret scanning sui repository pubblici.
-
-**I workflow** girano con i permessi minimi (`contents: read`; `write` solo nel
-job che allega l'IPA alla release), scaricano il codice senza lasciare credenziali
-nel checkout, e usano action bloccate a un commit preciso, non a un tag mobile;
-Dependabot propone gli avanzamenti in pull request. Le dipendenze dell'app si
-installano con il lockfile bloccato.
-
-**Le impronte.** Le note di ogni release riportano lo sha256 dell'APK, e accanto
-all'IPA c'è il suo file `.sha256`. L'app verifica l'md5 del pacchetto che scarica
-dal bridge prima di passarlo all'installatore.
-
-**Il bridge** non ha un'autenticazione propria: si fida della rete in cui sta, la
-LAN di casa o una VPN come Tailscale. Non va esposto su Internet. Serve file solo
-sotto il profilo utente e nelle cartelle di lavoro delle finestre aperte, e su
-iPhone la connessione in chiaro verso il PC è concessa esplicitamente
-nell'`Info.plist`, perché quel traffico non esce mai dalla rete privata.
+This part of the workflow is in place but has not been exercised yet: the
+first signed build is the one that tests it.
 
 ---
 
-## Funzionalità
+## Features
 
-- **Spazi e schede**: elenco dei workspace aperti sul PC con il ramo git, creazione
-  di nuovi spazi e schede, spostamento del focus della finestra Herdr.
-- **Agenti**: elenco degli agenti attivi con il relativo stato, con salto diretto
-  alla finestra che li ospita.
-- **Terminale**: output in tempo reale via WebSocket, link toccabili, ritorno a capo
-  disattivabile per non spezzare l'output formattato, scorrimento che segue le novità
-  solo quando sei già in fondo.
-- **Composer**: invio di comandi e prompt, cronologia, allegati caricati sul PC,
-  tasti `Esc`, `^C`, `Invio`, `Tab` e `Clear`.
-- **Finestre**: divisione a destra o in basso, vista affiancata o singola, chiusura,
-  tutto dal menu della scheda.
-
----
-
-## Struttura
-
-- [bridge/bridge.py](bridge/bridge.py): daemon FastAPI, WebSocket e web app.
-- [release.mjs](release.mjs): pubblica una release (vedi sopra).
-- [logo.mjs](logo.mjs): disegna il logo (il chevron di Herdr in dithering ordinato, matrice di Bayer 8×8 su una griglia di 32 celle) e scrive tutte le misure per Android e per gli asset Expo.
-- [.github/workflows](.github/workflows): controlli e build iOS.
-- `app/App.tsx`: composizione della schermata e stato della selezione.
-- `app/src/updates.ts`: versione installata, scelta del pacchetto, scaricamento verificato, installatore.
-- `app/src/theme.ts`: token di colore, spaziatura e tipografia.
-- `app/src/errors.ts`: i modi in cui il bridge può fallire, come dati anziché eccezioni.
-- `app/src/api.ts`: client REST del bridge, con timeout su ogni chiamata.
-- `app/src/storage.ts`: impostazioni di connessione salvate su file.
-- `app/src/ansi.ts`: pulizia dell'output, composizione dei paragrafi, link.
-- `app/src/history.ts`: la trascrizione di un agente, in turni.
-- `app/src/hooks/`: sessione WebSocket, geometria di sistema (inset, tastiera), aggiornamenti, cronologia.
-- `app/src/components/`: header, avviso di aggiornamento, schede, pannello laterale, terminale, cronologia, file, composer, overlay.
-- `app/src/icons.tsx`: icone disegnate con `View`, senza font né glifi.
+- **Workspaces and tabs**: the workspaces open on the PC with their git branch,
+  new workspaces and tabs, moving the focus of the Herdr window.
+- **Agents**: the running agents with their state, and a jump to the window
+  hosting each.
+- **Terminal**: live output over WebSocket, tappable links, word wrap you can
+  turn off so formatted output is not broken, scrolling that follows the new
+  lines only when you are already at the bottom.
+- **Composer**: commands and prompts, history, attachments uploaded to the PC,
+  the `Esc`, `^C`, `Invio`, `Tab` and `Clear` keys.
+- **Windows**: split right or down, side by side or single view, close, all
+  from the tab menu.
 
 ---
 
-## Come viene mostrato l'output
+## Development
 
-Lo schermo è una superficie di lettura, non una console. L'output del terminale
-arriva grezzo e viene giudicato riga per riga: le frasi sono composte in un
-carattere proporzionale con grazie, alla dimensione a cui si legge un testo, e i
-paragrafi che il terminale aveva spezzato alla propria larghezza vengono
-ricomposti. Tabelle, alberi e comandi restano a spaziatura fissa, perché lì il
-significato sta nell'allineamento. Le righe in cui l'agente riferisce di sé
-stesso sono presenti ma smorzate.
+```bash
+cd app
+bun install
+bun x expo start
+```
 
-I messaggi che hai inviato, che l'interfaccia desktop rimanda indietro con il
-proprio marcatore davanti, sono mostrati come il tuo turno della conversazione:
-a destra, in una forma propria, senza il marcatore.
+Expo Go on the phone scans the QR code. A local Android build:
 
-Il prompt e la barra di stato dell'interfaccia desktop non vengono mostrati:
-l'app ha già un proprio campo di scrittura e una propria intestazione, e
-tenerne due copie riempiva lo schermo di un telefono senza aggiungere nulla.
+```bash
+cd app/android
+gradlew assembleRelease -PreactNativeArchitectures=arm64-v8a
+```
 
----
-
-## Quanto indietro si scorre
-
-Per una shell, tutto ciò che Herdr conserva: mille righe di scrollback, che il
-bridge chiede per intero a ogni lettura.
-
-Per la finestra di un agente il terminale non basta: l'interfaccia di Claude
-Code ridisegna lo schermo sul posto e non lascia scrollback, quindi Herdr ha
-solo l'ultima schermata. La conversazione sta nella trascrizione che Claude
-Code scrive mentre lavora, in `~/.claude/projects`, e il bridge la legge da lì:
-risale al file dall'id di sessione che l'agente riporta a Herdr, oppure dal
-processo in primo piano nella finestra (Claude Code lascia una nota per
-processo in `~/.claude/sessions`), oppure, non trovando né l'uno né l'altro,
-prende la trascrizione più recente della cartella e lo dice. Il file viene
-letto in modo incrementale, solo la coda nuova a ogni richiesta, e i risultati
-dei tool, che sono il grosso del peso, non vengono nemmeno analizzati.
-
-Nell'app, in cima allo schermo di un agente, una riga offre di caricare la
-cronologia. Caricata, si scorre verso l'alto: i tuoi messaggi a destra, le
-risposte in prosa con i blocchi di codice a spaziatura fissa, i tool come una
-riga smorzata, i file nominati come miniature e schede. Dove Claude Code ha
-compattato il contesto, il riassunto che si scrive da solo (pagine di markdown
-archiviate come se le avessi mandate tu) non compare: al suo posto una riga
-dice che da lì l'agente ricorda solo un riepilogo. La cronologia si ferma
-dove comincia lo schermo, riconoscendo sullo schermo l'ultimo messaggio che hai
-mandato, e cresce con la sessione. Lo schermo resta al suo posto quando la
-cronologia compare sopra di lui.
+`start_mobile_app.bat` starts the dev server from the root.
 
 ---
 
-## Immagini e file nella sessione
+## Layout
 
-Il terminale nomina i file per percorso, e basta: uno screenshot fatto
-dall'agente, un pacchetto compilato, un allegato che gli hai mandato. L'app
-riconosce quei percorsi nel testo e chiede al bridge se esistono nella cartella
-di lavoro della finestra. Se un percorso non porta a nulla non occupa spazio.
+- [bridge/bridge.py](bridge/bridge.py): FastAPI daemon, WebSocket and web app.
+- [release.mjs](release.mjs): publishes a release (see above).
+- [logo.mjs](logo.mjs): draws the logo (Herdr's chevron in ordered dithering, an 8×8 Bayer matrix on a 32-cell grid) and writes every size for Android and for Expo's assets.
+- [.github/workflows](.github/workflows): checks and the iOS build.
+- `app/App.tsx`: screen composition and selection state.
+- `app/src/updates.ts`: installed version, package choice, verified download, installer.
+- `app/src/theme.ts`: colour, spacing and typography tokens.
+- `app/src/errors.ts`: the ways the bridge can fail, as data rather than exceptions.
+- `app/src/api.ts`: the bridge's REST client, with a timeout on every call and the token on every request.
+- `app/src/storage.ts`: connection settings saved to a file.
+- `app/src/ansi.ts`: output cleanup, paragraph composition, links.
+- `app/src/history.ts`: an agent's transcript, in turns.
+- `app/src/hooks/`: WebSocket session, system geometry (insets, keyboard), updates, history.
+- `app/src/components/`: header, update notice, tabs, side panel, terminal, history, files, composer, overlays.
+- `app/src/icons.tsx`: icons drawn with `View`, no font and no glyphs.
 
-Se il file è un'immagine, sotto la riga compare una miniatura, ridotta dal
-bridge per non scaricare screenshot interi: toccala per vederla a schermo
-intero e da lì condividerla. Se è un file da consegnare (APK, PDF, ZIP, CSV,
-documenti, audio, video) compare una scheda con il tipo, il nome e la
-dimensione: toccala per scaricarlo e aprirlo con l'app che il telefono ha per
-quel tipo; su Android un'APK finisce nell'installatore, e se nulla lo apre
-compare il foglio di condivisione, che su iPhone è la via per ogni file. I
-sorgenti non diventano schede, altrimenti ogni modifica che l'agente riferisce
-arriverebbe con una scheda accanto.
+---
 
-Gli allegati che scegli tu compaiono nel composer come miniature, con la X per
-toglierli prima dell'invio, e se ne possono allegare più d'uno alla volta. Una
-volta inviati stanno accanto al tuo messaggio, a destra, al posto del
-riferimento `@uploads/…` che il testo conteneva.
+## How output is shown
 
-Il bridge serve solo file sotto il tuo profilo utente o nelle cartelle di lavoro
-delle finestre aperte. Non è una barriera verso il telefono, che può già
-scrivere qualunque comando in qualunque terminale: evita che un percorso capitato
-in un output trasformi il bridge in un file server per tutto il disco.
+The screen is a reading surface, not a console. Terminal output arrives raw and
+is judged line by line: sentences are set in a proportional serif face at a
+size you read text at, and paragraphs the terminal had broken at its own width
+are put back together. Tables, trees and commands stay monospaced, because
+there the meaning is in the alignment. Lines where the agent reports on itself
+are present but dimmed.
+
+The messages you sent, which the desktop interface echoes back with its own
+marker in front, are shown as your turn in the conversation: on the right, in
+their own shape, without the marker.
+
+The desktop interface's prompt and status bar are not shown: the app already
+has its own input field and its own header, and two copies filled a phone
+screen without adding anything.
+
+---
+
+## How far back you can scroll
+
+For a shell, everything Herdr keeps: a thousand lines of scrollback, which the
+bridge asks for in full on every read.
+
+For an agent's window the terminal is not enough: Claude Code's interface
+redraws the screen in place and leaves no scrollback, so Herdr only has the
+last screen. The conversation lives in the transcript Claude Code writes as it
+works, under `~/.claude/projects`, and the bridge reads it from there: it finds
+the file from the session id the agent reports to Herdr, or from the foreground
+process in the window (Claude Code leaves a note per process in
+`~/.claude/sessions`), or, finding neither, takes the folder's most recent
+transcript and says so. The file is read incrementally, only the new tail on
+each request, and tool results, which are most of the weight, are not even
+parsed.
+
+In the app, at the top of an agent's screen, a line offers to load the history.
+Loaded, it scrolls upwards: your messages on the right, the replies as prose
+with monospaced code blocks, tools as a dimmed line, named files as thumbnails
+and cards. Where Claude Code compacted its context, the summary it writes to
+itself (pages of markdown filed as if you had sent them) does not appear: in
+its place a line says that from there on the agent only remembers a summary.
+The history stops where the screen begins, by recognising on the screen the
+last message you sent, and grows with the session. The screen stays put when
+the history appears above it.
+
+---
+
+## Images and files in the session
+
+The terminal names files by path, and that is all: a screenshot the agent took,
+a built package, an attachment you sent it. The app recognises those paths in
+the text and asks the bridge whether they exist in the window's working folder.
+A path that leads nowhere takes no space.
+
+If the file is an image, a thumbnail appears under the line, reduced by the
+bridge so full screenshots are not downloaded: tap it to see it full screen and
+share it from there. If it is a file to hand over (APK, PDF, ZIP, CSV,
+documents, audio, video) a card appears with type, name and size: tap it to
+download it and open it with whatever the phone has for that type; on Android
+an APK goes to the installer, and if nothing opens it the share sheet appears,
+which on iPhone is the way for every file. Source files do not become cards,
+otherwise every edit the agent reports would come with a card next to it.
+
+The attachments you pick appear in the composer as thumbnails, with an X to
+remove them before sending, and more than one can be attached at a time. Once
+sent they sit next to your message, on the right, in place of the
+`@uploads/…` reference the text contained.
 
 ---
 
 ## Effect
 
-L'app è scritta con [Effect](https://effect.website). Il bridge resta Python.
+The app is written with [Effect](https://effect.website). The bridge stays
+Python.
 
-Ogni chiamata al bridge dichiara nel proprio tipo come può fallire, e l'unico punto
-che mostra un errore all'utente è obbligato dal compilatore a coprirli tutti. Nessun
-`catch` silenzioso.
+Every call to the bridge declares in its type how it can fail, and the one
+place that shows an error to the user is forced by the compiler to cover them
+all. No silent `catch`.
 
-La sessione WebSocket è un ambito: socket, coda in ingresso, coda in uscita, ping e
-watchdog vengono acquisiti insieme e chiusi insieme, anche quando un tentativo muore
-a metà. La riconnessione è una politica dichiarata, non una catena di timer, e la
-lista delle finestre sottoscritte viene rimandata da sola a ogni riapertura.
+The WebSocket session is a scope: socket, inbound queue, outbound queue, ping
+and watchdog are acquired together and released together, even when an attempt
+dies halfway. Reconnection is a declared policy, not a chain of timers, and the
+list of subscribed windows is sent again by itself on every reopen.
+
+---
+
+## License
+
+[MIT](LICENSE).

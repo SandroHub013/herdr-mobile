@@ -11,11 +11,15 @@ import { StorageError } from './errors';
 export interface ConnectionSettings {
   host: string;
   port: string;
+  /** The shared secret the bridge prints at startup. Empty until entered. */
+  token: string;
 }
 
+/** A placeholder address on a home network: the real one is typed once, in the connection dialog. */
 export const DEFAULT_SETTINGS: ConnectionSettings = {
   host: '192.168.1.10',
   port: '43737',
+  token: '',
 };
 
 const FILE_NAME = 'herdr-connection.json';
@@ -25,6 +29,7 @@ const settingsFile = () => new File(Paths.document, FILE_NAME);
 const sanitise = (parsed: Partial<ConnectionSettings>): ConnectionSettings => ({
   host: typeof parsed.host === 'string' && parsed.host.trim() ? parsed.host.trim() : DEFAULT_SETTINGS.host,
   port: typeof parsed.port === 'string' && parsed.port.trim() ? parsed.port.trim() : DEFAULT_SETTINGS.port,
+  token: typeof parsed.token === 'string' ? parsed.token.trim() : '',
 });
 
 export const readSettings: Effect.Effect<ConnectionSettings, StorageError> = Effect.try({

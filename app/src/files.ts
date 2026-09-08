@@ -45,12 +45,14 @@ export const downloadFile = (
   name: string,
   size: number,
   onProgress: (fraction: number) => void,
+  headers: Record<string, string> = {},
 ): Effect.Effect<File, DownloadError> =>
   Effect.tryPromise({
     try: async () => {
       const destination = new File(receivedDirectory(), name);
       if (destination.exists) destination.delete();
       const task = File.createDownloadTask(url, destination, {
+        headers,
         onProgress: ({ bytesWritten, totalBytes }) => {
           const total = totalBytes > 0 ? totalBytes : size;
           if (total > 0) onProgress(Math.min(1, bytesWritten / total));

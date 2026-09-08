@@ -95,7 +95,7 @@ export function describeError(error: UploadError | UpdateError | ReceiveError): 
     case 'NetworkError':
       return error.cause ? `rete: ${error.cause}` : 'host irraggiungibile';
     case 'HttpError':
-      return `il bridge ha risposto ${error.status}`;
+      return error.status === 401 ? 'token del bridge mancante o sbagliato' : `il bridge ha risposto ${error.status}`;
     case 'DecodeError':
       return 'risposta del bridge non leggibile';
   }

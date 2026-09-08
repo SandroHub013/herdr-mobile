@@ -1,16 +1,16 @@
-# Pacchetti compilati: stanno nelle release di GitHub e, sul PC, in releases/
+# Built packages: they live in the GitHub releases and, on the PC, in releases/
 *.apk
 *.ipa
 releases/
 
-# Quello che il bridge riceve dal telefono
+# What the bridge receives from the phone
 uploads/
 
 # Python
 __pycache__/
 *.pyc
 
-# Schermate e prove locali
+# Local screenshots and scratch
 emulator_*.png
 .lavish/
 .claude/

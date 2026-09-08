@@ -21,6 +21,10 @@ const WATCHDOG_INTERVAL = Duration.seconds(5);
 const SILENCE_LIMIT_MS = 25000;
 const OUTBOX_CAPACITY = 64;
 const INBOX_CAPACITY = 256;
+/** How long the bridge gets to answer the token before the attempt is given up. */
+const AUTH_TIMEOUT = Duration.seconds(6);
+/** The close code the bridge uses when the token was missing or wrong. */
+const CLOSE_UNAUTHORIZED = 4401;
 
 /** Ctrl+U: readline "discard line". Clears the remote input before new text. */
 const CLEAR_LINE = '\x15';
@@ -35,6 +39,8 @@ type Outbound = Record<string, unknown>;
 
 export interface HerdrSession {
   connected: boolean;
+  /** The bridge refused the token: the user has to enter it, retrying alone will not help. */
+  unauthorized: boolean;
   snapshot: Snapshot;
   paneTexts: Record<string, string>;
   api: HerdrApi;
@@ -57,6 +63,7 @@ export interface HerdrSession {
 interface Handlers {
   readonly onConnected: () => void;
   readonly onDisconnected: () => void;
+  readonly onUnauthorized: () => void;
   readonly onSnapshot: (snapshot: Snapshot) => void;
   readonly onTerminalData: (paneId: string, text: string) => void;
 }
@@ -81,23 +88,35 @@ const openSocket = (url: string) =>
       }),
   );
 
-const decode = (raw: string): Snapshot | { paneId: string; text: string } | null => {
+type Inbound =
+  | { readonly kind: 'snapshot'; readonly snapshot: Snapshot }
+  | { readonly kind: 'terminal'; readonly paneId: string; readonly text: string }
+  | { readonly kind: 'authorized' }
+  | { readonly kind: 'unauthorized' };
+
+const decode = (raw: string): Inbound | null => {
   try {
     const message = JSON.parse(raw) as {
       type?: string;
+      error?: string;
       snapshot?: Partial<Snapshot>;
       pane_id?: string;
       text?: string;
     };
+    if (message.type === 'auth_ok') return { kind: 'authorized' };
+    if (message.type === 'error' && message.error === 'auth_required') return { kind: 'unauthorized' };
     if (message.type === 'snapshot_update' && message.snapshot) {
       return {
-        workspaces: message.snapshot.workspaces ?? [],
-        tabs: message.snapshot.tabs ?? [],
-        panes: message.snapshot.panes ?? [],
+        kind: 'snapshot',
+        snapshot: {
+          workspaces: message.snapshot.workspaces ?? [],
+          tabs: message.snapshot.tabs ?? [],
+          panes: message.snapshot.panes ?? [],
+        },
       };
     }
     if (message.type === 'terminal_data' && message.pane_id) {
-      return { paneId: message.pane_id, text: tidyTerminalText(String(message.text ?? '')) };
+      return { kind: 'terminal', paneId: message.pane_id, text: tidyTerminalText(String(message.text ?? '')) };
     }
     return null;
   } catch {
@@ -108,9 +127,14 @@ const decode = (raw: string): Snapshot | { paneId: string; text: string } | null
 /**
  * One connection attempt: stays alive until the socket closes, fails, or goes
  * quiet for too long. Failing is how a reconnect is requested.
+ *
+ * The first thing said on the socket is the token, and nothing else is sent
+ * until the bridge has accepted it: a subscription sent before that would be
+ * the message the bridge judges instead.
  */
 const connection = (
   url: string,
+  token: string,
   outbox: Queue.Queue<Outbound>,
   subscription: SubscriptionRef.SubscriptionRef<ReadonlyArray<string>>,
   handlers: Handlers,
@@ -120,6 +144,7 @@ const connection = (
 
     const inbox = yield* Queue.sliding<string>(INBOX_CAPACITY);
     const opened = yield* Deferred.make<void, SocketError>();
+    const authorized = yield* Deferred.make<void, SocketError>();
     const closed = yield* Deferred.make<never, SocketError>();
     const lastMessageAt = yield* Ref.make(Date.now());
 
@@ -128,17 +153,21 @@ const connection = (
     // The callbacks do not run on a fiber, hence the unsafe entry points; both
     // are no-ops once the deferred is already done.
     yield* Effect.sync(() => {
-      const die = (reason: 'closed' | 'failed') => () => {
+      const die = (reason: 'closed' | 'failed') => {
         const failure = Effect.fail(new SocketError({ reason }));
         Deferred.unsafeDone(opened, failure);
+        Deferred.unsafeDone(authorized, failure);
         Deferred.unsafeDone(closed, failure);
       };
       socket.onopen = () => Deferred.unsafeDone(opened, Effect.void);
       socket.onmessage = (event: WebSocketMessageEvent) => {
         Queue.unsafeOffer(inbox, String(event.data));
       };
-      socket.onclose = die('closed');
-      socket.onerror = die('failed');
+      socket.onclose = (event: WebSocketCloseEvent) => {
+        if (event.code === CLOSE_UNAUTHORIZED) handlers.onUnauthorized();
+        die('closed');
+      };
+      socket.onerror = () => die('failed');
     });
 
     yield* Deferred.await(opened);
@@ -154,6 +183,8 @@ const connection = (
         }
       });
 
+    yield* send({ action: 'auth', token });
+
     // Inbound messages: stamp the clock, then hand the payload to React.
     yield* Effect.forkScoped(
       Queue.take(inbox).pipe(
@@ -162,12 +193,29 @@ const connection = (
           Effect.sync(() => {
             const decoded = decode(raw);
             if (decoded === null) return;
-            if ('paneId' in decoded) handlers.onTerminalData(decoded.paneId, decoded.text);
-            else handlers.onSnapshot(decoded);
+            switch (decoded.kind) {
+              case 'authorized':
+                Deferred.unsafeDone(authorized, Effect.void);
+                return;
+              case 'unauthorized':
+                handlers.onUnauthorized();
+                return;
+              case 'terminal':
+                handlers.onTerminalData(decoded.paneId, decoded.text);
+                return;
+              case 'snapshot':
+                handlers.onSnapshot(decoded.snapshot);
+                return;
+            }
           }),
         ),
         Effect.forever,
       ),
+    );
+
+    // Whichever comes first: the bridge accepting the token, or closing on it.
+    yield* Effect.raceFirst(Deferred.await(authorized), Deferred.await(closed)).pipe(
+      Effect.timeoutFail({ duration: AUTH_TIMEOUT, onTimeout: () => new SocketError({ reason: 'failed' }) }),
     );
 
     // Anything the UI wants to say, in order, dropped oldest first if it piles up.
@@ -206,12 +254,13 @@ const connection = (
     Effect.onExit(() => Effect.sync(handlers.onDisconnected)),
   );
 
-export function useHerdrSession(host: string, port: string): HerdrSession {
+export function useHerdrSession(host: string, port: string, token: string): HerdrSession {
   const baseUrl = `http://${host}:${port}`;
   const wsUrl = `ws://${host}:${port}/ws`;
-  const api = useMemo(() => createApi(baseUrl), [baseUrl]);
+  const api = useMemo(() => createApi(baseUrl, token), [baseUrl, token]);
 
   const [connected, setConnected] = useState(false);
+  const [unauthorized, setUnauthorized] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT);
   const [paneTexts, setPaneTexts] = useState<Record<string, string>>({});
 
@@ -234,10 +283,14 @@ export function useHerdrSession(host: string, port: string): HerdrSession {
       onConnected: () => {
         connectedRef.current = true;
         setConnected(true);
+        setUnauthorized(false);
       },
       onDisconnected: () => {
         connectedRef.current = false;
         setConnected(false);
+      },
+      onUnauthorized: () => {
+        setUnauthorized(true);
       },
       onSnapshot: (next) => {
         setSnapshot(next);
@@ -263,19 +316,21 @@ export function useHerdrSession(host: string, port: string): HerdrSession {
   useEffect(() => {
     setSnapshot(EMPTY_SNAPSHOT);
     setPaneTexts({});
+    // New settings, new verdict: the flag belongs to the token that earned it.
+    setUnauthorized(false);
 
     const outbox = outboxRef.current;
     const subscription = subscriptionRef.current;
     if (!outbox || !subscription) return;
 
     const fiber = Effect.runFork(
-      connection(wsUrl, outbox, subscription, handlers).pipe(Effect.retry(reconnectPolicy)),
+      connection(wsUrl, token, outbox, subscription, handlers).pipe(Effect.retry(reconnectPolicy)),
     );
 
     return () => {
       Effect.runFork(Fiber.interrupt(fiber));
     };
-  }, [wsUrl, handlers]);
+  }, [wsUrl, token, handlers]);
 
   const subscribe = useCallback((paneIds: string[]) => {
     const subscription = subscriptionRef.current;
@@ -367,5 +422,5 @@ export function useHerdrSession(host: string, port: string): HerdrSession {
     [api, enqueue],
   );
 
-  return { connected, snapshot, paneTexts, api, subscribe, sendText, sendKeys, submit, refreshPane };
+  return { connected, unauthorized, snapshot, paneTexts, api, subscribe, sendText, sendKeys, submit, refreshPane };
 }

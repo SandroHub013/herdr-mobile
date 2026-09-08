@@ -110,15 +110,24 @@ const discardStaged = (staged: File): Effect.Effect<void> =>
     }
   });
 
-export function createApi(baseUrl: string) {
-  const get = <A>(path: string) => request<A>(`${baseUrl}${path}`, undefined, DEFAULT_TIMEOUT);
+/** The header the bridge reads the shared token from. */
+const TOKEN_HEADER = 'X-Herdr-Token';
+
+export function createApi(baseUrl: string, token = '') {
+  /**
+   * Sent with every request, and handed to whatever else fetches from the
+   * bridge outside this client: images and downloads.
+   */
+  const headers: Record<string, string> = token ? { [TOKEN_HEADER]: token } : {};
+
+  const get = <A>(path: string) => request<A>(`${baseUrl}${path}`, { headers }, DEFAULT_TIMEOUT);
 
   const post = <A>(path: string, body?: unknown) =>
     request<A>(
       `${baseUrl}${path}`,
       {
         method: 'POST',
-        headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+        headers: body === undefined ? headers : { ...headers, 'Content-Type': 'application/json' },
         body: body === undefined ? undefined : JSON.stringify(body),
       },
       DEFAULT_TIMEOUT,
@@ -132,6 +141,7 @@ export function createApi(baseUrl: string) {
 
   return {
     baseUrl,
+    headers,
 
     status: () => get<{ status: string; herdr_alive: boolean; local_ip: string }>('/api/status'),
 
@@ -210,7 +220,7 @@ export function createApi(baseUrl: string) {
 
         return yield* request<UploadResult>(
           `${baseUrl}/api/upload`,
-          { method: 'POST', body: form, headers: { Accept: 'application/json' } },
+          { method: 'POST', body: form, headers: { ...headers, Accept: 'application/json' } },
           UPLOAD_TIMEOUT,
         ).pipe(Effect.ensuring(discardStaged(staged)));
       }),

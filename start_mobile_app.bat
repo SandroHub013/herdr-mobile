@@ -1,12 +1,12 @@
 @echo off
-title Herdr Mobile - Expo App
+title Herdr Mobile - Expo dev server
 echo ========================================================
-echo       Herdr Mobile - Expo Dev Server
+echo       Herdr Mobile - Expo dev server
 echo ========================================================
 echo.
-echo  1. Assicurati che il bridge daemon sia avviato (start_bridge.bat)
-echo  2. Apri Expo Go sul tuo telefono Android/iOS
-echo  3. Inquadra il QR code per avviare l'app nativa!
+echo  1. Make sure the bridge is running (start_bridge.bat)
+echo  2. Open Expo Go on your Android or iOS phone
+echo  3. Scan the QR code to start the app
 echo.
 echo ========================================================
 echo.

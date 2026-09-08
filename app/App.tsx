@@ -33,8 +33,9 @@ function HerdrApp() {
   const toast = useToast();
 
   const [settings, setSettings] = useState<ConnectionSettings>(() => Effect.runSync(loadSettings));
-  const session = useHerdrSession(settings.host, settings.port);
-  const { api, subscribe, refreshPane, sendText, sendKeys, submit, connected, snapshot, paneTexts } = session;
+  const session = useHerdrSession(settings.host, settings.port, settings.token);
+  const { api, subscribe, refreshPane, sendText, sendKeys, submit, connected, unauthorized, snapshot, paneTexts } =
+    session;
   const { workspaces, tabs, panes } = snapshot;
   const appUpdate = useAppUpdate(api, connected, toast.show);
 
@@ -58,6 +59,7 @@ function HerdrApp() {
   const [spaceDialogOpen, setSpaceDialogOpen] = useState(false);
   const [draftHost, setDraftHost] = useState(settings.host);
   const [draftPort, setDraftPort] = useState(settings.port);
+  const [draftToken, setDraftToken] = useState(settings.token);
   const [newSpaceLabel, setNewSpaceLabel] = useState('');
 
   const sidebarIsPermanent = chrome.isLandscape;
@@ -423,18 +425,19 @@ function HerdrApp() {
     const host = draftHost.trim();
     const port = draftPort.trim() || DEFAULT_SETTINGS.port;
     if (!host) return;
-    const next = { host, port };
+    const next = { host, port, token: draftToken.trim() };
     setSettings(next);
     Effect.runFork(saveSettings(next));
     setActiveWorkspaceId(null);
     setActiveTabId(null);
     setActivePaneId(null);
     setConnectionOpen(false);
-  }, [draftHost, draftPort]);
+  }, [draftHost, draftPort, draftToken]);
 
   const openConnection = useCallback(() => {
     setDraftHost(settings.host);
     setDraftPort(settings.port);
+    setDraftToken(settings.token);
     setConnectionOpen(true);
   }, [settings]);
 
@@ -542,7 +545,13 @@ function HerdrApp() {
 
   const content = () => {
     if (!connected && workspaces.length === 0) {
-      return (
+      return unauthorized ? (
+        <EmptyState
+          title="Il bridge chiede un token"
+          detail="Lo stampa il bridge alla partenza e sta nel file bridge.token sul PC. Inseriscilo nel pannello Connessione."
+          action={<PrimaryButton label="Inserisci il token" onPress={openConnection} />}
+        />
+      ) : (
         <EmptyState
           title="Non connesso a Herdr"
           detail={`Nessuna risposta da ${settings.host}:${settings.port}. Verifica che il bridge sia in esecuzione sul PC.`}
@@ -674,6 +683,7 @@ function HerdrApp() {
           placeholder={DEFAULT_SETTINGS.port}
           keyboardType="numeric"
         />
+        <TextField label="Token" value={draftToken} onChangeText={setDraftToken} placeholder="dal file bridge.token sul PC" />
         <View style={styles.dialogRule}>
           <Divider />
         </View>

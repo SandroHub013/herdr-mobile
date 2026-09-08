@@ -1,11 +1,11 @@
-# La build per iPhone. Serve un Mac, e questo è l'unico posto dove ce n'è uno:
-# parte quando release.mjs pubblica una release su GitHub, compila l'IPA su un
-# runner macOS e lo allega alla stessa release, accanto all'APK.
+# The iPhone build. It needs a Mac, and this is the only place there is one:
+# it starts when release.mjs publishes a release on GitHub, builds the IPA on a
+# macOS runner and attaches it to the same release, next to the APK.
 #
-# Senza segreti l'IPA esce non firmato: chi lo riceve lo firma con il proprio
-# Apple ID (Sideloadly, AltStore) e lo installa. Con i segreti di un Apple
-# Developer Program la build viene firmata e, se il metodo è app-store-connect,
-# caricata su TestFlight. Vedi README, "iPhone".
+# Without secrets the IPA comes out unsigned: whoever receives it signs it with
+# their own Apple ID (Sideloadly, AltStore) and installs it. With the secrets
+# of an Apple Developer Program the build is signed and, when the method is
+# app-store-connect, uploaded to TestFlight. See the README, "iPhone".
 name: iOS
 
 on:
@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag della release a cui allegare l'IPA (vuoto: solo artefatto del workflow)"
+        description: "Release tag to attach the IPA to (empty: workflow artifact only)"
         required: false
         default: ""
 
@@ -31,10 +31,10 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     permissions:
-      contents: write # per allegare l'IPA alla release
+      contents: write # to attach the IPA to the release
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
-      # Segreti di firma, tutti opzionali. Vuoti: build non firmata.
+      # Signing secrets, all optional. Empty: unsigned build.
       IOS_CERT_P12: ${{ secrets.IOS_CERT_P12 }}
       IOS_CERT_PASSWORD: ${{ secrets.IOS_CERT_PASSWORD }}
       IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
@@ -52,18 +52,18 @@ jobs:
         with:
           bun-version: 1.4.0
 
-      - name: Strumenti
+      - name: Tools
         run: |
           xcodebuild -version
           pod --version
           bun --version
 
-      - name: Dipendenze
+      - name: Dependencies
         working-directory: app
         run: bun install --frozen-lockfile
 
-      - name: Versione
-        id: versione
+      - name: Version
+        id: version
         working-directory: app
         run: |
           VERSION="$(node -p "require('./app.json').expo.version")"
@@ -71,9 +71,9 @@ jobs:
           echo "ipa=HerdrMobile-$VERSION-ios.ipa" >> "$GITHUB_OUTPUT"
           echo "Herdr Mobile $VERSION"
 
-      # ios/ non è nel repository: viene generato qui da app.json, come Expo lo
-      # farebbe su un Mac, e i Pod installati sopra.
-      - name: Progetto iOS
+      # ios/ is not in the repository: it is generated here from app.json, the
+      # way Expo would on a Mac, and the Pods installed on top.
+      - name: iOS project
         working-directory: app
         env:
           CI: 1
@@ -83,12 +83,12 @@ jobs:
         working-directory: app/ios
         run: pod install
 
-      # ---------------------------------------------------------- non firmata
-      - name: Build non firmata
+      # ------------------------------------------------------------- unsigned
+      - name: Unsigned build
         if: env.IOS_CERT_P12 == ''
         working-directory: app/ios
         env:
-          IPA: ${{ steps.versione.outputs.ipa }}
+          IPA: ${{ steps.version.outputs.ipa }}
         run: |
           set -euo pipefail
           xcodebuild \
@@ -104,16 +104,16 @@ jobs:
           cp -R build/Build/Products/Release-iphoneos/HerdrMobile.app Payload/
           zip -qr "$GITHUB_WORKSPACE/$IPA" Payload
 
-      # -------------------------------------------------------------- firmata
-      # Certificato di distribuzione in un portachiavi temporaneo; i profili
-      # li crea Xcode da solo con la chiave App Store Connect.
-      - name: Chiavi di firma
+      # --------------------------------------------------------------- signed
+      # Distribution certificate in a temporary keychain; Xcode creates the
+      # profiles itself with the App Store Connect key.
+      - name: Signing keys
         if: env.IOS_CERT_P12 != ''
         run: |
           set -euo pipefail
-          test -n "$IOS_TEAM_ID" || { echo "manca IOS_TEAM_ID"; exit 1; }
-          test -n "$ASC_KEY_ID" -a -n "$ASC_ISSUER_ID" -a -n "$ASC_KEY_P8" || { echo "mancano ASC_KEY_ID, ASC_ISSUER_ID o ASC_KEY_P8"; exit 1; }
-          KEYCHAIN="$RUNNER_TEMP/firma.keychain-db"
+          test -n "$IOS_TEAM_ID" || { echo "IOS_TEAM_ID is missing"; exit 1; }
+          test -n "$ASC_KEY_ID" -a -n "$ASC_ISSUER_ID" -a -n "$ASC_KEY_P8" || { echo "ASC_KEY_ID, ASC_ISSUER_ID or ASC_KEY_P8 is missing"; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
@@ -127,11 +127,11 @@ jobs:
           printf '%s' "$ASC_KEY_P8" | base64 --decode > "$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8"
           echo "ASC_KEY_PATH=$RUNNER_TEMP/asc/AuthKey_$ASC_KEY_ID.p8" >> "$GITHUB_ENV"
 
-      - name: Build firmata
+      - name: Signed build
         if: env.IOS_CERT_P12 != ''
         working-directory: app/ios
         env:
-          IPA: ${{ steps.versione.outputs.ipa }}
+          IPA: ${{ steps.version.outputs.ipa }}
         run: |
           set -euo pipefail
           METHOD="${IOS_EXPORT_METHOD:-app-store-connect}"
@@ -172,34 +172,34 @@ jobs:
       - name: TestFlight
         if: env.IOS_CERT_P12 != '' && (env.IOS_EXPORT_METHOD == '' || env.IOS_EXPORT_METHOD == 'app-store-connect')
         env:
-          IPA: ${{ steps.versione.outputs.ipa }}
+          IPA: ${{ steps.version.outputs.ipa }}
         run: |
           set -euo pipefail
           mkdir -p ~/.private_keys
           cp "$ASC_KEY_PATH" ~/.private_keys/
           xcrun altool --upload-app --type ios --file "$IPA" --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID"
 
-      # ------------------------------------------------------------- consegna
-      - name: Impronta
+      # ------------------------------------------------------------- delivery
+      - name: Checksum
         env:
-          IPA: ${{ steps.versione.outputs.ipa }}
+          IPA: ${{ steps.version.outputs.ipa }}
         run: |
           set -euo pipefail
           shasum -a 256 "$IPA" | tee "$IPA.sha256"
           ls -la "$IPA"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: HerdrMobile-${{ steps.versione.outputs.version }}-ios
+          name: HerdrMobile-${{ steps.version.outputs.version }}-ios
           path: |
-            ${{ steps.versione.outputs.ipa }}
-            ${{ steps.versione.outputs.ipa }}.sha256
+            ${{ steps.version.outputs.ipa }}
+            ${{ steps.version.outputs.ipa }}.sha256
           if-no-files-found: error
           retention-days: 30
 
-      - name: Allega alla release
+      - name: Attach to the release
         if: env.TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          IPA: ${{ steps.versione.outputs.ipa }}
+          IPA: ${{ steps.version.outputs.ipa }}
         run: gh release upload "$TAG" "$IPA" "$IPA.sha256" --clobber
