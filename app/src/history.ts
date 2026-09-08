@@ -9,7 +9,8 @@
 
 export interface HistoryTurn {
   readonly seq: number;
-  readonly role: 'user' | 'assistant' | 'tool';
+  /** `system` marks a point in the session rather than a message: a compaction, where the agent's memory was cut to a summary. */
+  readonly role: 'user' | 'assistant' | 'tool' | 'system';
   readonly text: string;
   /** Pictures the reader pasted with the message; the transcript keeps their bytes, not their names. */
   readonly images?: number;
