@@ -1,7 +1,7 @@
 import { Duration, Effect } from 'effect';
 import { Directory, File, Paths } from 'expo-file-system';
+import { AgentInfo, ConversationPage } from './domain/events';
 import { SessionFile } from './files';
-import { HistoryPage } from './history';
 import { Release } from './updates';
 import {
   BridgeError,
@@ -159,13 +159,21 @@ export function createApi(baseUrl: string, token = '') {
     thumbUrl: (paneId: string, workspaceId: string, path: string, width: number, version: number) =>
       `${baseUrl}/api/files/thumb?${fileQuery(paneId, workspaceId, path)}&w=${width}&v=${version}`,
 
-    /** Everything Herdr still holds for the pane: its scrollback is a thousand lines. */
-    readPane: (paneId: string, lines = 1000) =>
-      get<{ text?: string }>(`/api/panes/${pane(paneId)}/read?lines=${lines}`),
+    /**
+     * What is running in the pane and what it can be asked to do. The app
+     * draws its controls from this and from nothing else, so a pane whose
+     * agent has no model to pick simply has no model pill.
+     */
+    agent: (paneId: string) => get<AgentInfo>(`/api/panes/${pane(paneId)}/agent`),
 
-    /** The conversation behind an agent pane, from its transcript; `after` skips turns already held. 404 for a plain shell. */
-    history: (paneId: string, after = 0) =>
-      get<HistoryPage>(`/api/panes/${pane(paneId)}/history?after=${after}`),
+    /**
+     * The conversation, or rather whatever changed since revision `since`.
+     * Zero asks for the lot. This is what keeps a session with two thousand
+     * events from being re-sent every few seconds, while still letting a tool
+     * call from an hour ago report that it has finally finished.
+     */
+    conversation: (paneId: string, since = 0) =>
+      get<ConversationPage>(`/api/panes/${pane(paneId)}/conversation?since=${since}`),
 
     focusPane: (paneId: string) => post<unknown>(`/api/panes/${pane(paneId)}/focus`),
 

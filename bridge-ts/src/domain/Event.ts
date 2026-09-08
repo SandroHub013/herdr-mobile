@@ -140,7 +140,19 @@ export class ConversationPage extends Schema.Class<ConversationPage>('Conversati
   agent: Schema.String,
   session: Schema.NullOr(Schema.String),
   match: SessionMatch,
-  /** Everything the adapter has, so the app can ask for only what comes after. */
+  /** Everything the adapter has, whether or not it was sent this time. */
   total: Schema.Number,
+  /**
+   * Where the conversation has got to. The app sends this back as `since` and
+   * receives whatever changed after it.
+   *
+   * Paging by index would be simpler and wrong: events are not only appended,
+   * they are amended. A tool call is written the moment it starts and rewritten
+   * when its result lands; a background run started before lunch is closed
+   * after it. Asking for "everything past number 400" would never mention
+   * number 12 again, and the app would show a task that finished an hour ago
+   * as still running.
+   */
+  rev: Schema.Number,
   events: Schema.Array(AgentEvent),
 }) {}

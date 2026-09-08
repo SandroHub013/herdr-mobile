@@ -136,14 +136,14 @@ const Conversation = HttpLayerRouter.add(
   guarded(
     Effect.gen(function* () {
       const paneId = yield* paneParam;
-      const after = Number((yield* query('after')) ?? 0) || 0;
+      const since = Number((yield* query('since')) ?? 0) || 0;
       const snapshots = yield* Snapshots;
       const adapters = yield* Adapters;
       const pane = yield* snapshots.pane(paneId);
       if (!pane) return yield* fail(404, 'Finestra sconosciuta');
 
       const adapter = yield* adapters.forPane(pane);
-      const page = yield* adapter.conversation(pane, after);
+      const page = yield* adapter.conversation(pane, since);
       return yield* json(page);
     }).pipe(Effect.catchTag('AdapterError', (cause) => fail(404, cause.reason))),
   ),

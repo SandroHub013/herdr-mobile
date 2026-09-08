@@ -13,7 +13,8 @@
   "dependencies": {
     "@effect/platform": "^0.97.1",
     "@effect/platform-node": "^0.108.1",
-    "effect": "^3.22.1"
+    "effect": "^3.22.1",
+    "sharp": "^0.35.4"
   },
   "devDependencies": {
     "@types/node": "^26.5.0",

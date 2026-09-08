@@ -1,32 +1,45 @@
 import React from 'react';
 import { ActivityIndicator, Image, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { colors, HIT_SLOP, radius, space, type } from '../theme';
-import { IconArrowUp, IconChevron, IconClose, IconPlus } from '../icons';
+import { IconArrowUp, IconClose, IconPlus } from '../icons';
 import { extensionLabel } from '../files';
-import { Chip, IconButton } from './Primitives';
+import { IconButton } from './Primitives';
+import { ControlPill } from './chat/ControlPill';
 import { Attachment } from '../types';
-
-export type ComposerKey = 'escape' | 'ctrl-c' | 'enter' | 'tab' | 'history-prev' | 'history-next' | 'clear';
+import type { Capabilities, Control } from '../domain/events';
 
 export function Composer({
   value,
   onChangeText,
   onSend,
-  onKey,
   onAttach,
   onRemoveAttachment,
+  onControl,
+  onInterrupt,
   attachments,
+  capabilities,
   targetLabel,
+  busy,
   disabled,
 }: {
   value: string;
   onChangeText: (text: string) => void;
   onSend: () => void;
-  onKey: (key: ComposerKey) => void;
   onAttach: () => void;
   onRemoveAttachment: (id: number) => void;
+  /** The literal keystrokes the manifest gave for the chosen option. */
+  onControl: (control: Control, optionId: string, send: string) => void;
+  onInterrupt: () => void;
   attachments: Attachment[];
+  /**
+   * What the agent in this pane can be asked. Null while it is being fetched,
+   * and for a pane that has no agent at all — in both cases there are simply
+   * no pills, which is the honest thing to show.
+   */
+  capabilities: Capabilities | null;
   targetLabel: string | null;
+  /** The agent is working: the send button becomes the way to stop it. */
+  busy: boolean;
   disabled: boolean;
 }) {
   // A message leaves with every reference in it, so it waits for uploads still on their way.
@@ -53,17 +66,24 @@ export function Composer({
           style={styles.input}
           value={value}
           onChangeText={onChangeText}
-          placeholder={targetLabel ? `Scrivi a ${targetLabel}` : 'Scrivi un comando'}
+          placeholder={
+            capabilities?.slashCommands
+              ? 'Digita / per i comandi'
+              : targetLabel
+                ? `Scrivi a ${targetLabel}`
+                : 'Scrivi un messaggio'
+          }
           placeholderTextColor={colors.textFaint}
-          autoCapitalize="none"
-          autoCorrect={false}
-          spellCheck={false}
+          // Prose now, not commands: the corrections that were in the way of
+          // typing `ls -la` are the ones that help when writing a sentence.
+          autoCapitalize="sentences"
+          autoCorrect
           multiline
           editable={!disabled}
           returnKeyType="send"
           submitBehavior="submit"
           onSubmitEditing={onSend}
-          accessibilityLabel="Comando o prompt da inviare"
+          accessibilityLabel="Messaggio da inviare all'agente"
         />
 
         <View style={styles.actions}>
@@ -77,6 +97,12 @@ export function Composer({
             <IconPlus size={15} color={colors.textMuted} />
           </IconButton>
 
+          {/*
+            One pill per control the agent declared, and none otherwise. The
+            keys that used to live here — Esc, ^C, Tab — were a terminal's
+            controls, not an agent's; stopping is the button on the right now,
+            and it sends whatever this particular agent answers to.
+          */}
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -84,37 +110,41 @@ export function Composer({
             contentContainerStyle={styles.keys}
             style={styles.keysScroll}
           >
-            <Chip label="Esc" mono onPress={() => onKey('escape')} disabled={disabled} />
-            <Chip label="^C" mono onPress={() => onKey('ctrl-c')} disabled={disabled} />
-            <Chip label="Invio" onPress={() => onKey('enter')} disabled={disabled} />
-            <Chip label="Tab" mono onPress={() => onKey('tab')} disabled={disabled} />
-            <Chip
-              label="Prec."
-              onPress={() => onKey('history-prev')}
-              leading={<IconChevron size={11} direction="up" color={colors.textMuted} />}
-            />
-            <Chip
-              label="Succ."
-              onPress={() => onKey('history-next')}
-              leading={<IconChevron size={11} direction="down" color={colors.textMuted} />}
-            />
-            <Chip label="Clear" mono onPress={() => onKey('clear')} disabled={disabled} />
+            {(capabilities?.controls ?? []).map((control) => (
+              <ControlPill
+                key={control.id}
+                control={control}
+                disabled={disabled}
+                onPick={(optionId, send) => onControl(control, optionId, send)}
+              />
+            ))}
           </ScrollView>
 
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Invia"
-            accessibilityState={{ disabled: !canSend }}
-            onPress={onSend}
-            disabled={!canSend}
-            style={({ pressed }) => [
-              styles.send,
-              canSend ? styles.sendActive : styles.sendIdle,
-              pressed && canSend && { opacity: 0.85 },
-            ]}
-          >
-            <IconArrowUp size={16} color={canSend ? '#FFFFFF' : colors.textFaint} />
-          </Pressable>
+          {busy ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Ferma l'agente"
+              onPress={onInterrupt}
+              style={({ pressed }) => [styles.send, styles.sendStop, pressed && { opacity: 0.85 }]}
+            >
+              <View style={styles.stopMark} />
+            </Pressable>
+          ) : (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Invia"
+              accessibilityState={{ disabled: !canSend }}
+              onPress={onSend}
+              disabled={!canSend}
+              style={({ pressed }) => [
+                styles.send,
+                canSend ? styles.sendActive : styles.sendIdle,
+                pressed && canSend && { opacity: 0.85 },
+              ]}
+            >
+              <IconArrowUp size={16} color={canSend ? '#FFFFFF' : colors.textFaint} />
+            </Pressable>
+          )}
         </View>
       </View>
     </View>
@@ -297,5 +327,15 @@ const styles = StyleSheet.create({
   },
   sendIdle: {
     backgroundColor: colors.surfaceRaised,
+  },
+  /** Stopping is the one destructive thing on the bar, and it says so. */
+  sendStop: {
+    backgroundColor: colors.danger,
+  },
+  stopMark: {
+    width: 11,
+    height: 11,
+    borderRadius: 2,
+    backgroundColor: '#FFFFFF',
   },
 });

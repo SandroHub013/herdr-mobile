@@ -52,11 +52,12 @@ export const make: Effect.Effect<Adapter, never, HerdrRpc> = Effect.gen(function
     // Claims anything, which is why the registry keeps it last.
     detect: () => Effect.succeed(true),
     capabilities: () => Effect.succeed(capabilities),
-    conversation: (pane, after) =>
+    conversation: (pane) =>
       Effect.gen(function* () {
         const text = yield* screen(pane.paneId);
-        // One event, replaced wholesale on every poll: the screen has no past,
-        // so there is nothing for `after` to skip and paging would be a lie.
+        // Always the same single event, resent every time. The screen has no
+        // past to page through and no revisions to track: it is simply what is
+        // on it now, and the app replaces what it held.
         const events = text
           ? [new MessageEvent({ seq: 0, role: 'assistant', text: '```\n' + text + '\n```' })]
           : [];
@@ -66,7 +67,8 @@ export const make: Effect.Effect<Adapter, never, HerdrRpc> = Effect.gen(function
           session: null,
           match: 'screen',
           total: events.length,
-          events: after > 0 ? [] : events,
+          rev: 0,
+          events,
         });
       }),
   };

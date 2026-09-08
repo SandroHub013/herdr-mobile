@@ -17,8 +17,10 @@ import { Divider, EmptyState, PrimaryButton, TextButton } from './src/components
 import { Header } from './src/components/Header';
 import { TabBar } from './src/components/TabBar';
 import { Sidebar, collectAgents } from './src/components/Sidebar';
-import { TerminalPane } from './src/components/TerminalPane';
-import { Composer, ComposerKey } from './src/components/Composer';
+import { ChatFeed } from './src/components/chat/ChatFeed';
+import { useConversation } from './src/hooks/useConversation';
+import { Composer } from './src/components/Composer';
+import type { Control } from './src/domain/events';
 import { ActionSheet, Dialog, SheetAction, TextField } from './src/components/Overlays';
 import { Toast, useToast } from './src/components/Toast';
 import { UpdateBanner } from './src/components/UpdateBanner';
@@ -34,8 +36,7 @@ function HerdrApp() {
 
   const [settings, setSettings] = useState<ConnectionSettings>(() => Effect.runSync(loadSettings));
   const session = useHerdrSession(settings.host, settings.port, settings.token);
-  const { api, subscribe, refreshPane, sendText, sendKeys, submit, connected, unauthorized, snapshot, paneTexts } =
-    session;
+  const { api, subscribe, sendText, sendKeys, submit, connected, unauthorized, snapshot } = session;
   const { workspaces, tabs, panes } = snapshot;
   const appUpdate = useAppUpdate(api, connected, toast.show);
 
@@ -43,8 +44,13 @@ function HerdrApp() {
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
 
-  const [layoutMode, setLayoutMode] = useState<'single' | 'split'>('single');
-  const [wrapOutput, setWrapOutput] = useState(true);
+  /**
+   * The conversation in the focused pane. Held here rather than inside the
+   * feed because the composer needs the same manifest: it is what decides
+   * which pills it shows, and one pane must not be read twice.
+   */
+  const conversation = useConversation(api, activePaneId);
+
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const [composerText, setComposerText] = useState('');
@@ -121,26 +127,6 @@ function HerdrApp() {
     subscribe(paneIdsKey ? paneIdsKey.split('|') : []);
   }, [paneIdsKey, subscribe]);
 
-  // One REST read per pane as a fallback, in case the stream is slow to start.
-  const primedRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    primedRef.current = new Set();
-  }, [settings.host, settings.port]);
-  useEffect(() => {
-    if (!paneIdsKey) return;
-    paneIdsKey.split('|').forEach((paneId) => {
-      if (paneTexts[paneId] === undefined && !primedRef.current.has(paneId)) {
-        primedRef.current.add(paneId);
-        refreshPane(paneId);
-      }
-    });
-  }, [paneIdsKey, paneTexts, refreshPane]);
-
-  // Collapse back to a single pane once a split is closed.
-  useEffect(() => {
-    if (layoutMode === 'split' && activeTabPanes.length < 2) setLayoutMode('single');
-  }, [layoutMode, activeTabPanes.length]);
-
   // ------------------------------------------------------------------ actions
 
   // Every bridge call ends here. The error channel is a closed union, so the
@@ -180,11 +166,12 @@ function HerdrApp() {
 
   const handleSelectPane = useCallback(
     (paneId: string) => {
+      // Changing pane changes the conversation being read; the hook watching
+      // it starts over on its own.
       setActivePaneId(paneId);
-      refreshPane(paneId);
       run('Finestra non attivata', api.focusPane(paneId));
     },
-    [api, refreshPane, run],
+    [api, run],
   );
 
   const handleNewTab = useCallback(() => {
@@ -218,8 +205,9 @@ function HerdrApp() {
         api.splitPane(paneId, direction).pipe(
           Effect.tap((result) =>
             Effect.sync(() => {
+              // The new pane becomes the one being read: splitting on the PC
+              // is still useful, but the phone shows one conversation.
               if (result?.pane?.pane_id) setActivePaneId(result.pane.pane_id);
-              setLayoutMode('split');
             }),
           ),
         ),
@@ -238,7 +226,6 @@ function HerdrApp() {
   const handleZoomPane = useCallback(
     (paneId: string) => {
       run('Zoom non riuscito', api.zoomPane(paneId));
-      setLayoutMode((previous) => (previous === 'single' ? 'split' : 'single'));
     },
     [api, run],
   );
@@ -287,65 +274,35 @@ function HerdrApp() {
     clearAttachments();
   }, [activePaneId, clearAttachments, composerText, submit, toast]);
 
-  const handleKey = useCallback(
-    (key: ComposerKey) => {
-      switch (key) {
-        case 'escape': {
-          if (!activePaneId) {
-            toast.show('Nessuna finestra selezionata');
-            return;
-          }
-          const paneId = activePaneId;
-          run(
-            'Interruzione non riuscita',
-            api.interruptPane(paneId).pipe(Effect.tap(() => Effect.sync(() => refreshPane(paneId)))),
-          );
-          return;
-        }
-        case 'ctrl-c':
-          emit('\x03');
-          return;
-        case 'enter':
-          // A real key event, not a "\r" in the text stream: see submit.
-          if (activePaneId) sendKeys(activePaneId, ['Enter']);
-          else toast.show('Nessuna finestra selezionata');
-          return;
-        case 'tab':
-          emit('\t');
-          return;
-        case 'clear':
-          if (activePaneId) submit(activePaneId, 'clear');
-          else toast.show('Nessuna finestra selezionata');
-          return;
-        case 'history-prev': {
-          if (history.length === 0) return;
-          if (historyIndex === -1) {
-            draftRef.current = composerText;
-            const next = history.length - 1;
-            setHistoryIndex(next);
-            setComposerText(history[next]);
-          } else if (historyIndex > 0) {
-            const next = historyIndex - 1;
-            setHistoryIndex(next);
-            setComposerText(history[next]);
-          }
-          return;
-        }
-        case 'history-next': {
-          if (historyIndex === -1) return;
-          if (historyIndex < history.length - 1) {
-            const next = historyIndex + 1;
-            setHistoryIndex(next);
-            setComposerText(history[next]);
-          } else {
-            setHistoryIndex(-1);
-            setComposerText(draftRef.current);
-          }
-        }
+  /**
+   * A control on the composer is not a request to the bridge: it is the
+   * keystrokes the agent's own manifest said would change that setting, typed
+   * into its pane. The app never decides what `/model opus` means, or whether
+   * this agent has models at all.
+   */
+  const handleControl = useCallback(
+    (_control: Control, _optionId: string, keys: string) => {
+      if (!keys) return;
+      if (!activePaneId) {
+        toast.show('Nessuna finestra selezionata');
+        return;
       }
+      sendText(activePaneId, keys);
+      // The setting lands in the transcript a moment later; ask sooner than
+      // the idle poll would, so the pill agrees with the agent.
+      void conversation.refresh();
     },
-    [activePaneId, api, composerText, emit, history, historyIndex, refreshPane, run, sendKeys, submit, toast],
+    [activePaneId, conversation, sendText, toast],
   );
+
+  /** Stops the agent with the keys its manifest names, not with a guess. */
+  const handleInterrupt = useCallback(() => {
+    if (!activePaneId) {
+      toast.show('Nessuna finestra selezionata');
+      return;
+    }
+    run('Interruzione non riuscita', api.interruptPane(activePaneId));
+  }, [activePaneId, api, run, toast]);
 
   const handleAttach = useCallback(() => {
     const program = Effect.gen(function* () {
@@ -443,12 +400,6 @@ function HerdrApp() {
 
   // ------------------------------------------------------------------ render
 
-  const panesToRender = useMemo(() => {
-    if (layoutMode === 'split' && activeTabPanes.length > 1) return activeTabPanes;
-    if (activePane) return [activePane];
-    return activeTabPanes.slice(0, 1);
-  }, [activePane, activeTabPanes, layoutMode]);
-
   const sheetActions: SheetAction[] = useMemo(() => {
     const actions: SheetAction[] = [
       {
@@ -464,21 +415,6 @@ function HerdrApp() {
         onPress: () => handleSplit('down'),
       },
     ];
-
-    if (activeTabPanes.length > 1) {
-      actions.push({
-        key: 'layout',
-        label: layoutMode === 'split' ? 'Mostra una finestra' : 'Mostra tutte le finestre',
-        detail: `${activeTabPanes.length} finestre in questa scheda`,
-        icon:
-          layoutMode === 'split' ? (
-            <IconSinglePane size={16} color={colors.textMuted} />
-          ) : (
-            <IconSplitRight size={16} color={colors.textMuted} />
-          ),
-        onPress: () => setLayoutMode(layoutMode === 'split' ? 'single' : 'split'),
-      });
-    }
 
     if (activePaneId && activeTabPanes.length > 1) {
       actions.push({
@@ -513,7 +449,6 @@ function HerdrApp() {
     api,
     handleClosePane,
     handleSplit,
-    layoutMode,
     openConnection,
     run,
     settings,
@@ -541,7 +476,7 @@ function HerdrApp() {
     />
   );
 
-  const hasPanes = panesToRender.length > 0;
+  const hasPanes = activePane !== undefined || activeTabPanes.length > 0;
 
   const content = () => {
     if (!connected && workspaces.length === 0) {
@@ -565,27 +500,9 @@ function HerdrApp() {
     if (!hasPanes) {
       return <EmptyState title="Nessuna finestra in questa scheda" detail="Aprine una dal menu della scheda." />;
     }
-    return (
-      <View style={[styles.panes, layoutMode === 'split' && (chrome.isLandscape ? styles.splitRow : styles.splitColumn)]}>
-        {panesToRender.map((pane, index) => (
-          <TerminalPane
-            key={pane.pane_id}
-            api={api}
-            pane={pane}
-            index={index}
-            text={paneTexts[pane.pane_id] ?? ''}
-            focused={pane.pane_id === activePaneId}
-            showControls={activeTabPanes.length > 1}
-            wrap={wrapOutput}
-            onToggleWrap={() => setWrapOutput((previous) => !previous)}
-            onFocus={() => handleSelectPane(pane.pane_id)}
-            onZoom={() => handleZoomPane(pane.pane_id)}
-            onClose={() => handleClosePane(pane.pane_id)}
-            notify={toast.show}
-          />
-        ))}
-      </View>
-    );
+    // One conversation at a time. Splitting the screen was a terminal's idea:
+    // two chats side by side on a phone leaves neither of them readable.
+    return <ChatFeed conversation={conversation} />;
   };
 
   const bottomPadding = chrome.keyboardVisible ? chrome.keyboardOffset : chrome.bottomInset;
@@ -635,11 +552,14 @@ function HerdrApp() {
             value={composerText}
             onChangeText={setComposerText}
             onSend={handleSend}
-            onKey={handleKey}
             onAttach={handleAttach}
             onRemoveAttachment={handleRemoveAttachment}
+            onControl={handleControl}
+            onInterrupt={handleInterrupt}
             attachments={attachments}
+            capabilities={conversation.agent?.capabilities ?? null}
             targetLabel={activePane ? paneTitle(activePane) : null}
+            busy={conversation.busy}
             disabled={!activePaneId}
           />
         </View>

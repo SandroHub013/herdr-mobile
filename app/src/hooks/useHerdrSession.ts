@@ -41,9 +41,12 @@ export interface HerdrSession {
   /** The bridge refused the token: the user has to enter it, retrying alone will not help. */
   unauthorized: boolean;
   snapshot: Snapshot;
-  paneTexts: Record<string, string>;
   api: HerdrApi;
-  /** Declares which panes should stream terminal output. */
+  /**
+   * Declares which panes the phone is actually looking at. Nothing streams
+   * back any more — the conversation is fetched by revision over HTTP — but
+   * the bridge still uses it to know which sessions are worth keeping warm.
+   */
   subscribe: (paneIds: string[]) => void;
   sendText: (paneId: string, text: string) => void;
   sendKeys: (paneId: string, keys: string[]) => void;
@@ -56,7 +59,6 @@ export interface HerdrSession {
    * desktop input box, and the next message is appended to it.
    */
   submit: (paneId: string, text: string) => void;
-  refreshPane: (paneId: string) => void;
 }
 
 interface Handlers {
@@ -64,7 +66,6 @@ interface Handlers {
   readonly onDisconnected: () => void;
   readonly onUnauthorized: () => void;
   readonly onSnapshot: (snapshot: Snapshot) => void;
-  readonly onTerminalData: (paneId: string, text: string) => void;
 }
 
 const openSocket = (url: string) =>
@@ -89,7 +90,6 @@ const openSocket = (url: string) =>
 
 type Inbound =
   | { readonly kind: 'snapshot'; readonly snapshot: Snapshot }
-  | { readonly kind: 'terminal'; readonly paneId: string; readonly text: string }
   | { readonly kind: 'authorized' }
   | { readonly kind: 'unauthorized' };
 
@@ -113,9 +113,6 @@ const decode = (raw: string): Inbound | null => {
           panes: message.snapshot.panes ?? [],
         },
       };
-    }
-    if (message.type === 'terminal_data' && message.pane_id) {
-      return { kind: 'terminal', paneId: message.pane_id, text: String(message.text ?? '') };
     }
     return null;
   } catch {
@@ -199,9 +196,6 @@ const connection = (
               case 'unauthorized':
                 handlers.onUnauthorized();
                 return;
-              case 'terminal':
-                handlers.onTerminalData(decoded.paneId, decoded.text);
-                return;
               case 'snapshot':
                 handlers.onSnapshot(decoded.snapshot);
                 return;
@@ -261,7 +255,6 @@ export function useHerdrSession(host: string, port: string, token: string): Herd
   const [connected, setConnected] = useState(false);
   const [unauthorized, setUnauthorized] = useState(false);
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT);
-  const [paneTexts, setPaneTexts] = useState<Record<string, string>>({});
 
   const connectedRef = useRef(false);
   const outboxRef = useRef<Queue.Queue<Outbound> | null>(null);
@@ -293,20 +286,6 @@ export function useHerdrSession(host: string, port: string, token: string): Herd
       },
       onSnapshot: (next) => {
         setSnapshot(next);
-        // Drop cached output for panes that no longer exist.
-        setPaneTexts((previous) => {
-          const live = new Set(next.panes.map((p) => p.pane_id));
-          const kept: Record<string, string> = {};
-          let removed = false;
-          for (const paneId of Object.keys(previous)) {
-            if (live.has(paneId)) kept[paneId] = previous[paneId];
-            else removed = true;
-          }
-          return removed ? kept : previous;
-        });
-      },
-      onTerminalData: (paneId, text) => {
-        setPaneTexts((previous) => (previous[paneId] === text ? previous : { ...previous, [paneId]: text }));
       },
     }),
     [],
@@ -314,7 +293,6 @@ export function useHerdrSession(host: string, port: string, token: string): Herd
 
   useEffect(() => {
     setSnapshot(EMPTY_SNAPSHOT);
-    setPaneTexts({});
     // New settings, new verdict: the flag belongs to the token that earned it.
     setUnauthorized(false);
 
@@ -353,24 +331,6 @@ export function useHerdrSession(host: string, port: string, token: string): Herd
     // in which the UI produced the messages.
     Queue.unsafeOffer(outbox, payload);
   }, []);
-
-  const refreshPane = useCallback(
-    (paneId: string) => {
-      Effect.runFork(
-        api.readPane(paneId).pipe(
-          Effect.tap((result) =>
-            Effect.sync(() => {
-              const text = result?.text ?? '';
-              setPaneTexts((previous) => (previous[paneId] === text ? previous : { ...previous, [paneId]: text }));
-            }),
-          ),
-          // The socket stream is the primary source; a failed poll is not fatal.
-          Effect.ignore,
-        ),
-      );
-    },
-    [api],
-  );
 
   const sendText = useCallback(
     (paneId: string, text: string) => {
@@ -421,5 +381,5 @@ export function useHerdrSession(host: string, port: string, token: string): Herd
     [api, enqueue],
   );
 
-  return { connected, unauthorized, snapshot, paneTexts, api, subscribe, sendText, sendKeys, submit, refreshPane };
+  return { connected, unauthorized, snapshot, api, subscribe, sendText, sendKeys, submit };
 }

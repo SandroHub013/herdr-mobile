@@ -1,13 +1,16 @@
 import { createServer } from 'node:http';
 import os from 'node:os';
 import { HttpLayerRouter } from '@effect/platform';
-import { NodeHttpServer, NodeRuntime } from '@effect/platform-node';
+import { NodeContext, NodeHttpServer, NodeRuntime } from '@effect/platform-node';
 import { Effect, Layer, Logger, LogLevel } from 'effect';
 import * as Adapter from './adapters/Adapter.ts';
 import * as ClaudeCode from './adapters/ClaudeCode.ts';
 import * as Terminal from './adapters/Terminal.ts';
+import * as FileRoutes from './FileRoutes.ts';
 import * as Routes from './Routes.ts';
+import * as Socket from './Socket.ts';
 import * as Config from './services/Config.ts';
+import * as Files from './services/Files.ts';
 import * as HerdrRpc from './services/HerdrRpc.ts';
 import * as Snapshot from './services/Snapshot.ts';
 import * as Transcript from './services/Transcript.ts';
@@ -91,8 +94,19 @@ const AdaptersLive = Layer.effect(
 ).pipe(Layer.provide(Layer.mergeAll(RpcLive, TranscriptLive)));
 
 const SnapshotLive = Snapshot.layer.pipe(Layer.provide(RpcLive));
+const FilesLive = Files.layer.pipe(Layer.provide(SnapshotLive));
 
-const Services = Layer.mergeAll(ConfigLive, RpcLive, TranscriptLive, AdaptersLive, SnapshotLive);
+const Services = Layer.mergeAll(
+  ConfigLive,
+  RpcLive,
+  TranscriptLive,
+  AdaptersLive,
+  SnapshotLive,
+  FilesLive,
+  // Serving a file and taking a multipart upload both want the platform's
+  // filesystem and path services.
+  NodeContext.layer,
+);
 
 const banner = Effect.gen(function* () {
   const config = yield* Config.BridgeConfig;
@@ -116,6 +130,8 @@ const banner = Effect.gen(function* () {
  */
 const Application = Layer.mergeAll(
   Routes.layer,
+  FileRoutes.layer,
+  Socket.layer,
   Layer.effectDiscard(banner),
 ).pipe(Layer.provide(HttpLayerRouter.cors({ allowedOrigins: ['*'], allowedHeaders: ['*'] })));
 

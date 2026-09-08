@@ -155,11 +155,21 @@ interface State {
   lastAssistant?: { mid: string; event: MessageEvent };
   permissionMode?: string;
   seq: number;
-}
+  /** Bumped on every write, appended or amended. */
+  rev: number;
+  /** When each event last changed, so the app can ask for only those. */
+  revBySeq: Map<number, number>;
+};
+
+const touch = (state: State, seq: number) => {
+  state.rev += 1;
+  state.revBySeq.set(seq, state.rev);
+};
 
 const push = (state: State, make: (seq: number) => AgentEvent): AgentEvent => {
   const event = make(state.seq++);
   state.events.push(event);
+  touch(state, event.seq);
   return event;
 };
 
@@ -174,6 +184,7 @@ const replace = (state: State, previous: ToolEvent, next: ToolEvent) => {
   state.byToolId.set(next.call.id, next);
   const task = next.call.background?.id;
   if (task) state.byTaskId.set(task, next);
+  touch(state, next.seq);
 };
 
 const TASK_NOTIFICATION = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/;
@@ -251,6 +262,7 @@ function consume(state: State, line: string): void {
           const merged = new MessageEvent({ ...open.event, text: `${open.event.text}\n\n${text}` });
           const at = state.events.indexOf(open.event);
           if (at !== -1) state.events[at] = merged;
+          touch(state, merged.seq);
           state.lastAssistant = { mid, event: merged };
           continue;
         }
@@ -403,7 +415,14 @@ function completeCall(
 }
 
 const consumer: Consumer<State> = {
-  init: () => ({ events: [], byToolId: new Map(), byTaskId: new Map(), seq: 0 }),
+  init: () => ({
+    events: [],
+    byToolId: new Map(),
+    byTaskId: new Map(),
+    seq: 0,
+    rev: 0,
+    revBySeq: new Map(),
+  }),
   consume,
 };
 
@@ -535,7 +554,7 @@ export const make: Effect.Effect<Adapter, never, HerdrRpc | Transcript> = Effect
           return capabilitiesFor(state?.permissionMode);
         }),
 
-      conversation: (pane, after) =>
+      conversation: (pane, since) =>
         Effect.gen(function* () {
           const located = yield* locate(pane);
           if (!located) {
@@ -547,13 +566,19 @@ export const make: Effect.Effect<Adapter, never, HerdrRpc | Transcript> = Effect
           const state = yield* transcript.read(located.file, consumer).pipe(
             Effect.mapError((cause) => new AdapterError({ adapter: 'claude-code', reason: cause.reason })),
           );
+          // Whatever changed since the app last looked, appended or amended.
+          const changed =
+            since <= 0
+              ? state.events
+              : state.events.filter((event) => (state.revBySeq.get(event.seq) ?? 0) > since);
           return new ConversationPage({
             paneId: pane.paneId,
             agent: 'claude-code',
             session: located.session,
             match: located.match,
             total: state.events.length,
-            events: state.events.slice(Math.max(0, after)),
+            rev: state.rev,
+            events: changed,
           });
         }),
     };

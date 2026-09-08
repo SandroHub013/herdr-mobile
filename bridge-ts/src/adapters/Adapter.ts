@@ -40,10 +40,13 @@ export interface Adapter {
    */
   readonly detect: (pane: PaneInfo) => Effect.Effect<boolean>;
   readonly capabilities: (pane: PaneInfo) => Effect.Effect<Capabilities>;
-  /** Events from `after` onward; the app holds everything before it already. */
+  /**
+   * Everything that changed after revision `since` — appended or amended.
+   * Zero means the app has nothing and wants the lot.
+   */
   readonly conversation: (
     pane: PaneInfo,
-    after: number,
+    since: number,
   ) => Effect.Effect<ConversationPage, AdapterError>;
 }
 
