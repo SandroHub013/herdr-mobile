@@ -2,14 +2,14 @@
   "expo": {
     "name": "Herdr Mobile",
     "slug": "herdr-mobile",
-    "version": "1.1.10",
+    "version": "1.2.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0B0B0D",
     "ios": {
       "bundleIdentifier": "dev.herdr.mobile",
-      "buildNumber": "12",
+      "buildNumber": "13",
       "supportsTablet": true,
       "infoPlist": {
         "NSAppTransportSecurity": {
@@ -19,12 +19,14 @@
         "NSLocalNetworkUsageDescription": "Herdr Mobile parla con il bridge sul tuo PC, nella stessa rete o attraverso la VPN.",
         "ITSAppUsesNonExemptEncryption": false,
         "CFBundleDevelopmentRegion": "it",
-        "CFBundleLocalizations": ["it"]
+        "CFBundleLocalizations": [
+          "it"
+        ]
       }
     },
     "android": {
       "package": "dev.herdr.mobile",
-      "versionCode": 12,
+      "versionCode": 13,
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES"
       ],
