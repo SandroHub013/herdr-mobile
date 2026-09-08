@@ -2,7 +2,7 @@ import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { colors, space, type } from '../theme';
 import { LastCheck, UpdateState } from '../hooks/useAppUpdate';
-import { installedBuild, installedVersion } from '../updates';
+import { installedBuild, installedVersion, UPDATES_FROM_BRIDGE } from '../updates';
 import { Chip } from './Primitives';
 
 /**
@@ -26,8 +26,9 @@ export function VersionRow({
 }) {
   const checking = lastCheck?.status === 'checking';
   const pending = state.status !== 'idle';
-  const action =
-    state.status === 'downloading'
+  const action = !UPDATES_FROM_BRIDGE
+    ? null
+    : state.status === 'downloading'
       ? null
       : state.status === 'ready'
         ? 'Installa'
@@ -71,6 +72,7 @@ function describe(state: UpdateState, lastCheck: LastCheck | null): string {
     case 'idle':
       break;
   }
+  if (!UPDATES_FROM_BRIDGE) return `Build ${installedBuild()} · le nuove versioni arrivano da GitHub`;
   if (!lastCheck) return `Build ${installedBuild()}`;
   switch (lastCheck.status) {
     case 'checking':

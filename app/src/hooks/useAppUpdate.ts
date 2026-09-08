@@ -13,6 +13,7 @@ import {
   pickApk,
   Release,
   ReleaseApk,
+  UPDATES_FROM_BRIDGE,
 } from '../updates';
 
 /**
@@ -57,6 +58,7 @@ export function useAppUpdate(api: HerdrApi, connected: boolean, notify: (message
 
   const check = useCallback(
     (reason: CheckReason) => {
+      if (!UPDATES_FROM_BRIDGE) return;
       const now = Date.now();
       if (reason === 'foreground' && now - lastCheckRef.current < FOREGROUND_INTERVAL_MS) return;
       // A download in flight is not interrupted by a routine check.
