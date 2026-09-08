@@ -14,6 +14,7 @@ import { colors, radius, space, type } from '../theme';
 import { IconChevron, IconClose, IconExpand, StatusDot } from '../icons';
 import { EmptyState, IconButton } from './Primitives';
 import { SessionFiles } from './SessionFiles';
+import { SessionHistory } from './SessionHistory';
 import { HerdrApi } from '../api';
 import { LineKind, OutputLine, segmentOutput } from '../ansi';
 import { isBusy, Pane, paneTitle } from '../types';
@@ -135,6 +136,17 @@ export function TerminalPane({
       />
     ) : null;
 
+  // The conversation before the screen, for a pane an agent runs in. Always
+  // the first child, even when empty, so the live output keeps the same index
+  // for the scroll anchor below.
+  const history = (
+    <View>
+      {pane.agent ? (
+        <SessionHistory api={api} pane={pane} screenText={displayedText} onOpenLink={openUrl} notify={notify} />
+      ) : null}
+    </View>
+  );
+
   const outputText = (
     <View style={styles.lines}>
       {lines.map((line, lineIndex) =>
@@ -218,7 +230,11 @@ export function TerminalPane({
           onContentSizeChange={handleContentSizeChange}
           scrollEventThrottle={64}
           keyboardShouldPersistTaps="handled"
+          // When the history loads or grows above the screen, the screen stays
+          // where the reader left it instead of being pushed out of view.
+          maintainVisibleContentPosition={{ minIndexForVisible: 1 }}
         >
+          {history}
           {isEmpty ? (
             <EmptyState title="Nessun output" detail="Questa finestra non ha ancora prodotto testo." />
           ) : wrap ? (

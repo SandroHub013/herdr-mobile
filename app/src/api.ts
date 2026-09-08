@@ -1,6 +1,7 @@
 import { Duration, Effect } from 'effect';
 import { Directory, File, Paths } from 'expo-file-system';
 import { SessionFile } from './files';
+import { HistoryPage } from './history';
 import { Release } from './updates';
 import {
   BridgeError,
@@ -148,8 +149,13 @@ export function createApi(baseUrl: string) {
     thumbUrl: (paneId: string, workspaceId: string, path: string, width: number, version: number) =>
       `${baseUrl}/api/files/thumb?${fileQuery(paneId, workspaceId, path)}&w=${width}&v=${version}`,
 
-    readPane: (paneId: string, lines = 120) =>
+    /** Everything Herdr still holds for the pane: its scrollback is a thousand lines. */
+    readPane: (paneId: string, lines = 1000) =>
       get<{ text?: string }>(`/api/panes/${pane(paneId)}/read?lines=${lines}`),
+
+    /** The conversation behind an agent pane, from its transcript; `after` skips turns already held. 404 for a plain shell. */
+    history: (paneId: string, after = 0) =>
+      get<HistoryPage>(`/api/panes/${pane(paneId)}/history?after=${after}`),
 
     focusPane: (paneId: string) => post<unknown>(`/api/panes/${pane(paneId)}/focus`),
 
