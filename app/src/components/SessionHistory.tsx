@@ -70,6 +70,10 @@ export function SessionHistory({
           <Text key={`tools-${block.seq}`} style={styles.tools} numberOfLines={2}>
             {describeTools(block.lines)}
           </Text>
+        ) : block.turn.role === 'system' ? (
+          <Text key={block.turn.seq} style={styles.note}>
+            {block.turn.text}
+          </Text>
         ) : block.turn.role === 'user' ? (
           <UserTurn key={block.turn.seq} api={api} pane={pane} turn={block.turn} onOpenLink={onOpenLink} notify={notify} />
         ) : (
