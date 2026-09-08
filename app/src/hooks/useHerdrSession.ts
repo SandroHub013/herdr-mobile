@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Deferred, Duration, Effect, Fiber, Queue, Ref, Schedule, Stream, SubscriptionRef } from 'effect';
 import { createApi, HerdrApi } from '../api';
 import { SocketError } from '../errors';
-import { tidyTerminalText } from '../ansi';
 import { Snapshot } from '../types';
 
 /**
@@ -116,7 +115,7 @@ const decode = (raw: string): Inbound | null => {
       };
     }
     if (message.type === 'terminal_data' && message.pane_id) {
-      return { kind: 'terminal', paneId: message.pane_id, text: tidyTerminalText(String(message.text ?? '')) };
+      return { kind: 'terminal', paneId: message.pane_id, text: String(message.text ?? '') };
     }
     return null;
   } catch {
@@ -361,7 +360,7 @@ export function useHerdrSession(host: string, port: string, token: string): Herd
         api.readPane(paneId).pipe(
           Effect.tap((result) =>
             Effect.sync(() => {
-              const text = tidyTerminalText(result?.text ?? '');
+              const text = result?.text ?? '';
               setPaneTexts((previous) => (previous[paneId] === text ? previous : { ...previous, [paneId]: text }));
             }),
           ),

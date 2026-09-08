@@ -19,6 +19,8 @@ const SINGLE = /\x1b[=><NOM78]/g;
 const LONE_ESC = /\x1b/g;
 // eslint-disable-next-line no-control-regex
 const BELL = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+/** A glyph that did not survive the trip from the agent to Herdr: noise, not text. */
+const REPLACEMENT = /�/g;
 
 /**
  * Sequences that reached us without their ESC byte. Digits are required so that
@@ -37,7 +39,8 @@ export function stripAnsi(input: string): string {
     .replace(LONE_ESC, '')
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '')
-    .replace(BELL, '');
+    .replace(BELL, '')
+    .replace(REPLACEMENT, '');
 }
 
 /** Vertical frame characters a TUI draws down the sides of a box. */
@@ -45,15 +48,162 @@ const BOX_SIDES = /[│┃┆┇┊┋╎╏║]/;
 const LEADING_BOX_SIDE = /^\s*[│┃┆┇┊┋╎╏║][ \t]?/;
 const TRAILING_BOX_SIDE = /[ \t]?[│┃┆┇┊┋╎╏║]\s*$/;
 
-/** A line made only of rule characters: "____", "─────", "- - - -". */
-const RULE_LINE = /^[_\-=~‾–—―─━═╌╍┄┅┈┉⎯⏤ \t]+$/;
-/** A line made only of box-drawing pieces: "╭────╮", "├───┤". */
-const BOX_LINE = /^[╭╮╰╯┌┐└┘├┤┬┴┼─━│┃═║╔╗╚╝╠╣╦╩╬╪╫ \t]+$/;
+/**
+ * A line made only of drawing: a rule ("____", "─────", "- - - -"), a box
+ * edge ("╭────╮", "├───┤", "╹────"), a bar of block elements. The box-drawing
+ * and block-element ranges are taken whole, since each interface picks its
+ * own corners and weights.
+ */
+const DECORATIVE_LINE = /^[─-▟_\-=~‾–—―⎯⏤ \t]+$/;
 
 function isDecorative(line: string): boolean {
   const trimmed = line.trim();
   if (trimmed.length < 3) return false;
-  return RULE_LINE.test(trimmed) || BOX_LINE.test(trimmed);
+  return DECORATIVE_LINE.test(trimmed);
+}
+
+const isBlank = (row: string) => row.trim() === '';
+
+// ----------------------------------------------------------------- sidebar
+
+/** What an interface draws down a divider: box sides and solid bars. */
+const DIVIDER = /[│┃┆┇┊┋╎╏║▌▐█▏▕]/;
+/** A panel starts past this column; anything nearer is the text itself. */
+const SIDEBAR_MIN_COLUMN = 40;
+/** Rows a panel must occupy to count as one. */
+const SIDEBAR_MIN_ROWS = 5;
+/** Empty columns that must separate the text from a panel. */
+const SIDEBAR_MIN_GAP = 2;
+
+/**
+ * Rows with text past `from` and, on some of them, nothing before `to`: a
+ * panel beside the conversation. A table has something in every column of
+ * every row and never passes.
+ */
+function panelShape(content: string[], to: number, from: number): boolean {
+  let right = 0;
+  let rightOnly = 0;
+  for (const row of content) {
+    if (row.slice(from).trim() === '') continue;
+    right++;
+    if (row.slice(0, to).trim() === '') rightOnly++;
+  }
+  return right >= SIDEBAR_MIN_ROWS && rightOnly >= 2;
+}
+
+/** A divider drawn at the same column on most rows, with a panel past it. */
+function dividerColumn(content: string[], width: number): number | null {
+  const needed = Math.max(SIDEBAR_MIN_ROWS, Math.ceil(content.length / 2));
+  for (let x = width - 1; x >= SIDEBAR_MIN_COLUMN; x--) {
+    let hits = 0;
+    for (const row of content) {
+      if (x < row.length && DIVIDER.test(row[x])) hits++;
+    }
+    if (hits >= needed && panelShape(content, x, x + 1)) return x;
+  }
+  return null;
+}
+
+/** Whether a row has text at `column` with an empty gap just before it. */
+function beginsAt(row: string, column: number): boolean {
+  return row.length > column && row[column] !== ' ' && row.slice(Math.max(0, column - SIDEBAR_MIN_GAP), column).trim() === '';
+}
+
+/**
+ * A panel with no divider: found where text begins on the rows that hold
+ * nothing else, then confirmed by enough rows whose text begins at that same
+ * column after a gap. A table lines its columns up too, but every row of it
+ * has something before them.
+ */
+function panelColumn(content: string[]): number | null {
+  const starts = content.map((row) => row.search(/\S/)).filter((start) => start >= SIDEBAR_MIN_COLUMN);
+  if (starts.length < 2) return null;
+  const column = Math.min(...starts);
+  const rows = content.filter((row) => beginsAt(row, column)).length;
+  return rows >= SIDEBAR_MIN_ROWS ? column : null;
+}
+
+/**
+ * Some interfaces keep a panel down the right of a wide terminal: session
+ * name, token counts, cost, language servers. Read row by row on a phone, that
+ * panel interleaves with the conversation, a fragment of it after every line.
+ * The panel is found by its geometry, a divider column or a column where text
+ * begins on rows that hold nothing else, and everything from there on goes.
+ */
+function dropSidebar(rows: string[]): string[] {
+  const content = rows.filter((row) => !isBlank(row) && !isDecorative(row));
+  if (content.length <= SIDEBAR_MIN_ROWS) return rows;
+  const width = Math.max(...content.map((row) => row.trimEnd().length));
+  if (width < 2 * SIDEBAR_MIN_COLUMN) return rows;
+
+  const divider = dividerColumn(content, width);
+  if (divider !== null) return rows.map((row) => (row.length > divider ? row.slice(0, divider) : row));
+
+  const panel = panelColumn(content);
+  if (panel === null) return rows;
+  // Only rows that reach the panel across a gap are cut: a line that runs
+  // through that column is text, whatever the panel does elsewhere.
+  return rows.map((row) => (beginsAt(row, panel) ? row.slice(0, panel) : row));
+}
+
+// ------------------------------------------------------------------ header
+
+/** Rows the tab bar of an interface may take at the top of the screen. */
+const HEADER_REACH = 4;
+
+/** Drops a tab bar drawn across the top of the screen, down to its rule. */
+function dropTopChrome(rows: string[]): string[] {
+  for (let i = 0; i < Math.min(rows.length, HEADER_REACH); i++) {
+    if (isDecorative(rows[i])) return rows.slice(i + 1);
+  }
+  return rows;
+}
+
+// ------------------------------------------------------------------ footer
+
+/** The interface's own prompt, empty or with a hint or a line typed into it. */
+const PROMPT_ROW = /^\s*[❯>]\s*(?:\S.*)?$/;
+/** A status bar: key hints, context and quota counters. */
+const STATUS_ROW = /ctrl\+|\bctx\b|\bcontext \d+%|\d+%\)|\bquota\b/i;
+/** A row of the input box, framed down its left side. */
+const BORDERED_ROW = /^\s*[│┃║▌▐█▏]/;
+/** Rows the input box may take. */
+const INPUT_BOX_ROWS = 8;
+
+/**
+ * Drops the foot of an agent's interface when it has no "❯" prompt to find it
+ * by: the status bar, the rule over it, and the prompt or the framed input
+ * box above that. Read from the bottom, each part is taken only in its place
+ * and only once, so a table that happens to end the conversation stays.
+ */
+function dropAgentFooter(rows: string[]): string[] {
+  const out = [...rows];
+  const trim = () => {
+    while (out.length > 0 && isBlank(out[out.length - 1])) out.pop();
+  };
+  const take = (matches: (row: string) => boolean, limit: number) => {
+    let taken = 0;
+    while (out.length > 0 && taken < limit) {
+      const last = out[out.length - 1];
+      if (isBlank(last)) {
+        out.pop();
+        continue;
+      }
+      if (!matches(last)) break;
+      out.pop();
+      taken++;
+    }
+    return taken;
+  };
+  const isStatus = (row: string) => STATUS_ROW.test(row) || COLUMNAR.test(row) || isDecorative(row);
+
+  trim();
+  take(isStatus, 2);
+  take(isDecorative, 1);
+  if (take((row) => PROMPT_ROW.test(row), 1) > 0) take(isDecorative, 1);
+  else take((row) => BORDERED_ROW.test(row), INPUT_BOX_ROWS);
+  trim();
+  return out;
 }
 
 /**
@@ -85,21 +235,29 @@ const FOOTER_REACH = 10;
  * copy shows the reader two of everything and pushes the actual conversation off
  * the top of a phone screen.
  */
-function dropTrailingChrome(lines: string[]): string[] {
+function dropTrailingChrome(lines: string[]): string[] | null {
   for (let i = lines.length - 1; i >= Math.max(0, lines.length - FOOTER_REACH); i--) {
     if (PROMPT_LINE.test(lines[i])) return lines.slice(0, i);
   }
-  return lines;
+  return null;
 }
 
 /**
  * The desktop TUI frames its output in boxes and separates sections with rules.
  * On a phone those turn into pages of stray lines that carry no information, so
  * the view drops them: this is a readable transcript, not a faithful terminal.
+ *
+ * For a window an agent runs in, its interface is taken apart first: the panel
+ * some of them keep down the right of the screen, and the input box and status
+ * bar at the foot. Which agent does not matter; the shapes are read from the
+ * screen itself.
  */
-export function tidyTerminalText(input: string): string {
-  const cleaned = stripAnsi(input)
-    .split('\n')
+export function tidyTerminalText(input: string, agent?: string): string {
+  let rows = stripAnsi(input).split('\n');
+  rows = dropTrailingChrome(rows) ?? (agent ? dropAgentFooter(rows) : rows);
+  if (agent) rows = dropSidebar(dropTopChrome(rows));
+
+  const cleaned = rows
     .map((line) => {
       const unframed = BOX_SIDES.test(line)
         ? line.replace(LEADING_BOX_SIDE, '').replace(TRAILING_BOX_SIDE, '')
@@ -108,9 +266,7 @@ export function tidyTerminalText(input: string): string {
       return isDecorative(trimmed) ? '' : trimmed;
     });
 
-  const lines = dropTrailingChrome(cleaned).filter(
-    (line) => !TIP_LINE.test(line) && !RIGHT_ALIGNED_CHROME.test(line),
-  );
+  const lines = cleaned.filter((line) => !TIP_LINE.test(line) && !RIGHT_ALIGNED_CHROME.test(line));
 
   while (lines.length > 0 && lines[0].trim() === '') lines.shift();
   while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
@@ -257,11 +413,19 @@ const BLOCK_START = /^\s*(?:[-*•‣▪◦●○※]|\d+[.)])\s/;
  */
 const USER_LINE = /^\s*❯\s+\S/;
 const USER_MARKER = /^\s*❯\s+/;
+/**
+ * The same, for interfaces that echo the message behind a plain ">". Only an
+ * agent's window reads that way: in a shell, ">" is a quote or a redirect.
+ */
+const AGENT_USER_LINE = /^\s*[❯>]\s+\S/;
+const AGENT_USER_MARKER = /^\s*[❯>]\s+/;
 
-/** "Ran 2 shell commands", "Running 1 shell command · 1m 20s…". */
-const ACTIVITY = /^(?:Ran|Running|Read|Searched|Listed|Wrote|Edited)\b.*$/;
+/** "Ran 2 shell commands", "Running 1 shell command · 1m 20s…", "Thought · 1.5s". */
+const ACTIVITY = /^(?:Ran|Running|Read|Searched|Listed|Wrote|Edited|Thought|Thinking)\b.*$/;
 /** The working indicator and its counters. */
 const SPINNER = /^[✳✻✶✽*·]\s+\S+…/;
+/** The model line some interfaces print under each reply: "▣ Build · Muse Spark · 15.8s". */
+const MODEL_LINE = /^[▣■◼]\s+\S/;
 
 /**
  * A single ordinary word on a line of its own, lightly indented: how the last
@@ -278,11 +442,11 @@ const LONE_WORD = /^\s{0,3}[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'’]*[.,:;!?]?\s*$/;
  * tables and command echoes whose meaning is in the alignment, and setting those
  * proportionally destroys them. So each line is judged on its own.
  */
-function classify(line: string): LineKind {
+function classify(line: string, agent?: string): LineKind {
   const trimmed = line.trim();
   if (trimmed.length === 0) return 'prose';
-  if (USER_LINE.test(line)) return 'user';
-  if (ACTIVITY.test(trimmed) || SPINNER.test(trimmed)) return 'meta';
+  if ((agent ? AGENT_USER_LINE : USER_LINE).test(line)) return 'user';
+  if (ACTIVITY.test(trimmed) || SPINNER.test(trimmed) || MODEL_LINE.test(trimmed)) return 'meta';
   if (STRUCTURAL.test(line) || COLUMNAR.test(line)) return 'mono';
 
   // A list bullet or a message marker is punctuation that says nothing about
@@ -318,10 +482,11 @@ function classify(line: string): LineKind {
  * keeping those breaks wraps text that is already wrapped and leaves a trail of
  * two-word lines. Paragraphs are separated by a blank line, which survives.
  */
-export function segmentOutput(text: string): OutputLine[] {
+export function segmentOutput(text: string, agent?: string): OutputLine[] {
   if (!text) return [];
 
   const blocks: { kind: LineKind; text: string }[] = [];
+  const userMarker = agent ? AGENT_USER_MARKER : USER_MARKER;
 
   for (const line of text.split('\n')) {
     if (line.trim() === '') {
@@ -331,7 +496,8 @@ export function segmentOutput(text: string): OutputLine[] {
 
     const previous = blocks[blocks.length - 1];
     const afterParagraph = (previous?.kind === 'prose' || previous?.kind === 'user') && previous.text !== '';
-    const kind = classify(line) === 'mono' && afterParagraph && LONE_WORD.test(line) ? 'prose' : classify(line);
+    const judged = classify(line, agent);
+    const kind = judged === 'mono' && afterParagraph && LONE_WORD.test(line) ? 'prose' : judged;
 
     // A sent message wraps like any paragraph, so its second line is a plain
     // indented sentence and belongs to the message above it.
@@ -343,7 +509,7 @@ export function segmentOutput(text: string): OutputLine[] {
     }
 
     if (kind === 'user') {
-      blocks.push({ kind, text: line.replace(USER_MARKER, '').trim() });
+      blocks.push({ kind, text: line.replace(userMarker, '').trim() });
       continue;
     }
 

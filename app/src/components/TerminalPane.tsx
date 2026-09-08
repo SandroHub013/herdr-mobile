@@ -16,7 +16,7 @@ import { EmptyState, IconButton } from './Primitives';
 import { SessionFiles } from './SessionFiles';
 import { SessionHistory } from './SessionHistory';
 import { HerdrApi } from '../api';
-import { LineKind, OutputLine, segmentOutput } from '../ansi';
+import { LineKind, OutputLine, segmentOutput, tidyTerminalText } from '../ansi';
 import { isBusy, Pane, paneTitle } from '../types';
 
 const BOTTOM_THRESHOLD_PX = 48;
@@ -79,7 +79,10 @@ export function TerminalPane({
     if (pinnedToBottomRef.current) applyPendingOutput();
   }, [text, applyPendingOutput]);
 
-  const lines = useMemo(() => segmentOutput(displayedText), [displayedText]);
+  // The screen as it is read here, not as the terminal drew it: the agent's
+  // own interface is taken apart first, and which agent tells how.
+  const screen = useMemo(() => tidyTerminalText(displayedText, pane.agent), [displayedText, pane.agent]);
+  const lines = useMemo(() => segmentOutput(screen, pane.agent), [screen, pane.agent]);
   const busy = isBusy(pane.agent_status);
   const hasPendingOutput = displayedText !== text;
 
@@ -142,7 +145,7 @@ export function TerminalPane({
   const history = (
     <View>
       {pane.agent ? (
-        <SessionHistory api={api} pane={pane} screenText={displayedText} onOpenLink={openUrl} notify={notify} />
+        <SessionHistory api={api} pane={pane} screenText={screen} onOpenLink={openUrl} notify={notify} />
       ) : null}
     </View>
   );
