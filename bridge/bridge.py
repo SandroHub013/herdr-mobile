@@ -6,6 +6,7 @@ and real-time ANSI terminal rendering with xterm.js.
 
 import argparse
 import asyncio
+import contextlib
 import hmac
 import json
 import mimetypes
@@ -108,7 +109,17 @@ class HerdrPipeClient:
 
 herdr_client = HerdrPipeClient()
 
-app = FastAPI(title="Herdr Mobile Bridge", version="2.1.0")
+@contextlib.asynccontextmanager
+async def lifespan(_: FastAPI):
+    """The sync loop runs for as long as the server does."""
+    sync = asyncio.create_task(background_sync_loop())
+    try:
+        yield
+    finally:
+        sync.cancel()
+
+
+app = FastAPI(title="Herdr Mobile Bridge", version="2.1.0", lifespan=lifespan)
 
 
 # ---------------------------------------------------------------------------
@@ -342,11 +353,6 @@ async def background_sync_loop():
             pass
 
         await asyncio.sleep(0.3)
-
-
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(background_sync_loop())
 
 
 # ---------------------------------------------------------------------------
