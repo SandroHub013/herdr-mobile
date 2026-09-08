@@ -4,10 +4,10 @@
  *
  *   node logo.mjs
  *
- * The mark is Herdr's chevron, set in ordered dithering: two colours per
- * layer and nothing in between, mixed by an 8x8 Bayer matrix on a coarse
- * pixel grid, so the gradient is made of dots you can see. No anti-aliasing
- * anywhere, on purpose.
+ * The mark is a phone with an H lit on its screen, set in ordered dithering:
+ * two colours per layer and nothing in between, mixed by an 8x8 Bayer matrix
+ * on a coarse pixel grid, so the gradient is made of dots you can see. No
+ * anti-aliasing anywhere, on purpose.
  *
  * Output:
  *   app/android/app/src/main/res/mipmap-*    launcher, round, adaptive layers
@@ -36,14 +36,31 @@ const WHITE = [255, 255, 255];
 
 // ------------------------------------------------------------------- design
 
-/** Herdr's chevron: two capsules meeting at the apex, in a unit square. */
-const APEX = { x: 0.5, y: 0.3 };
-const FOOT_LEFT = { x: 0.28, y: 0.665 };
-const FOOT_RIGHT = { x: 0.72, y: 0.665 };
-const HALF_WIDTH = 0.072;
-
+/**
+ * The mark: a phone, seen face on, with an H lit on its screen.
+ *
+ * Everything is measured in a unit square so one description serves every
+ * size, from a 48px launcher icon to the 1024px store image. The numbers are
+ * chosen for the smallest of those: at 32 cells across, the phone is fourteen
+ * cells wide and the H's bars are not quite two, which is the least that
+ * survives being dithered.
+ */
 /** Cells across the canvas. Fewer cells, bigger dots. */
 const CELLS = 32;
+/** One cell, in design units. Every measurement below is a whole number of these. */
+const C = 1 / CELLS;
+
+/**
+ * Measured in whole cells, which is the only way the H comes out straight.
+ * A bar 0.031 wide is 0.99 cells: sampled at cell centres it catches one
+ * column here and two there, and the letter arrives with a limp. On the grid,
+ * both uprights are two cells and the thing is symmetric by construction.
+ */
+const PHONE = { cx: 0.5, cy: 0.5, halfW: 7 * C, halfH: 10 * C, radius: 2 * C };
+/** The bezel. Thick enough to stay a frame rather than a hairline. */
+const BEZEL = 2 * C;
+/** The H, centred on the screen: two cells thick, six across, eight tall. */
+const GLYPH = { halfW: 3 * C, halfH: 4 * C, bar: 2 * C };
 
 const BAYER = [
   0, 32, 8, 40, 2, 34, 10, 42,
@@ -56,22 +73,52 @@ const BAYER = [
   63, 31, 55, 23, 61, 29, 53, 21,
 ].map((n) => (n + 0.5) / 64);
 
-function distanceToSegment(p, a, b) {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const t = Math.max(0, Math.min(1, ((p.x - a.x) * abx + (p.y - a.y) * aby) / (abx * abx + aby * aby)));
-  const dx = p.x - (a.x + t * abx);
-  const dy = p.y - (a.y + t * aby);
-  return Math.sqrt(dx * dx + dy * dy);
+/**
+ * Distance from a point to a rounded rectangle: negative inside, positive out.
+ * One function draws both the phone and its screen, which is what keeps the
+ * bezel an even thickness all the way round the corners.
+ */
+function roundedRect(p, cx, cy, halfW, halfH, radius) {
+  const dx = Math.abs(p.x - cx) - (halfW - radius);
+  const dy = Math.abs(p.y - cy) - (halfH - radius);
+  const outside = Math.hypot(Math.max(dx, 0), Math.max(dy, 0));
+  return outside + Math.min(Math.max(dx, dy), 0) - radius;
 }
 
-/** Whether a design point sits inside the chevron, and how far down it it is (0 top, 1 feet). */
-function chevron(p, scale) {
+/** The H: two uprights and the bar between them. */
+function insideGlyph(p) {
+  const x = p.x - PHONE.cx;
+  const y = p.y - PHONE.cy;
+  if (Math.abs(y) > GLYPH.halfH) return false;
+  const upright = Math.abs(Math.abs(x) - (GLYPH.halfW - GLYPH.bar / 2)) <= GLYPH.bar / 2;
+  const crossbar = Math.abs(y) <= GLYPH.bar / 2 && Math.abs(x) <= GLYPH.halfW;
+  return upright || crossbar;
+}
+
+/**
+ * Which part of the mark a point falls in, and how far down the mark it is
+ * (0 at the top, 1 at the bottom) — the gradient the dithering resolves into
+ * dots. Null means the point is outside the phone altogether.
+ */
+function mark(p, scale) {
   const q = { x: 0.5 + (p.x - 0.5) / scale, y: 0.5 + (p.y - 0.5) / scale };
-  const d = Math.min(distanceToSegment(q, APEX, FOOT_LEFT), distanceToSegment(q, APEX, FOOT_RIGHT));
-  if (d > HALF_WIDTH) return null;
-  const depth = Math.max(0, Math.min(1, (q.y - (APEX.y - HALF_WIDTH)) / (FOOT_LEFT.y + HALF_WIDTH - (APEX.y - HALF_WIDTH))));
-  return depth;
+  if (roundedRect(q, PHONE.cx, PHONE.cy, PHONE.halfW, PHONE.halfH, PHONE.radius) > 0) return null;
+
+  const top = PHONE.cy - PHONE.halfH;
+  const depth = Math.max(0, Math.min(1, (q.y - top) / (PHONE.halfH * 2)));
+
+  if (insideGlyph(q)) return { part: 'glyph', depth };
+
+  const inScreen =
+    roundedRect(
+      q,
+      PHONE.cx,
+      PHONE.cy,
+      PHONE.halfW - BEZEL,
+      PHONE.halfH - BEZEL,
+      Math.max(0.012, PHONE.radius - BEZEL),
+    ) <= 0;
+  return { part: inScreen ? 'screen' : 'frame', depth };
 }
 
 // ----------------------------------------------------------------- drawing
@@ -105,11 +152,24 @@ function render(size, layer, scale = 1) {
       }
 
       if (layer !== 'background') {
-        const depth = chevron(p, scale);
-        if (depth !== null) {
+        const hit = mark(p, scale);
+        if (hit !== null) {
+          const { part, depth } = hit;
           if (layer === 'monochrome') {
-            rgb = WHITE;
-            alpha = 1 - depth * 0.62 > threshold ? 255 : 0;
+            // A themed icon is one colour on nothing, so the screen is left
+            // empty: what remains is the phone's outline with the H inside it.
+            if (part !== 'screen') {
+              rgb = WHITE;
+              alpha = 1 - depth * 0.62 > threshold ? 255 : 0;
+            }
+          } else if (part === 'glyph') {
+            rgb = 1 - depth * 0.5 > threshold ? WHITE : LIGHT;
+            alpha = 255;
+          } else if (part === 'screen') {
+            // Dark, so the H reads as lit rather than cut out, and dithered
+            // so it does not go flat against the frame.
+            rgb = 0.42 - depth * 0.22 > threshold ? GLOW : BG;
+            alpha = 255;
           } else {
             rgb = 1 - depth * 0.88 > threshold ? LIGHT : BLUE;
             alpha = 255;

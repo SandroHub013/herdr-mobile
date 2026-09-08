@@ -1,0 +1,22 @@
+{
+  "name": "herdr-mobile-bridge",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "The Herdr Mobile bridge: it reads what the agents on this PC are doing and hands it to the phone as a conversation.",
+  "main": "src/main.ts",
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
+    "dev": "node --watch --experimental-strip-types src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform": "^0.97.1",
+    "@effect/platform-node": "^0.108.1",
+    "effect": "^3.22.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.5.0",
+    "typescript": "^7.0.2"
+  }
+}
