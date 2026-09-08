@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+import { Platform } from 'react-native';
 import * as Application from 'expo-application';
 import * as Device from 'expo-device';
 import { Directory, File, Paths } from 'expo-file-system';
@@ -31,6 +32,13 @@ export interface Release {
   readonly notes: string;
   readonly apks: Readonly<Record<string, ReleaseApk>>;
 }
+
+/**
+ * Only Android lets an app hand a package to the installer. On iPhone the
+ * build comes signed from the GitHub release, and a newer one is installed
+ * the same way the first was, so the bridge is never asked.
+ */
+export const UPDATES_FROM_BRIDGE = Platform.OS === 'android';
 
 const ARM64 = 'arm64-v8a';
 const UNIVERSAL = 'universal';

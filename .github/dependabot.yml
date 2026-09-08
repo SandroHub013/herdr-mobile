@@ -1,0 +1,11 @@
+# Le action sono bloccate a un commit preciso (vedi i workflow): Dependabot
+# propone l'aggiornamento del commit quando esce una versione nuova, e la
+# modifica passa da una pull request invece di entrare da sola.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - ci

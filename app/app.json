@@ -8,7 +8,19 @@
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0B0B0D",
     "ios": {
-      "supportsTablet": true
+      "bundleIdentifier": "dev.herdr.mobile",
+      "buildNumber": "12",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        },
+        "NSLocalNetworkUsageDescription": "Herdr Mobile parla con il bridge sul tuo PC, nella stessa rete o attraverso la VPN.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "CFBundleDevelopmentRegion": "it",
+        "CFBundleLocalizations": ["it"]
+      }
     },
     "android": {
       "package": "dev.herdr.mobile",
@@ -28,7 +40,16 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#0B0B0D",
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 160,
+          "resizeMode": "contain"
+        }
+      ]
     ]
   }
 }

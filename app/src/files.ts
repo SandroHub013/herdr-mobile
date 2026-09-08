@@ -1,4 +1,5 @@
 import { Effect } from 'effect';
+import { Platform } from 'react-native';
 import { Directory, File, Paths } from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
 import * as Sharing from 'expo-sharing';
@@ -65,16 +66,21 @@ export const downloadFile = (
 /**
  * Hands the file to the app Android has for its kind: a package goes to the
  * installer, a document to a viewer. When nothing claims it, the share sheet
- * lets the reader choose where it goes.
+ * lets the reader choose where it goes. iOS has no intents: the share sheet
+ * is the way a file reaches another app, and it offers the viewers too.
  */
 export const openFile = (file: File, mime: string): Effect.Effect<void, OpenError> =>
   Effect.tryPromise({
     try: async () => {
-      try {
-        await IntentLauncher.startActivityAsync(VIEW, { data: file.contentUri, type: mime, flags: GRANT_READ_URI });
-      } catch {
-        await Sharing.shareAsync(file.uri, { mimeType: mime });
+      if (Platform.OS === 'android') {
+        try {
+          await IntentLauncher.startActivityAsync(VIEW, { data: file.contentUri, type: mime, flags: GRANT_READ_URI });
+          return;
+        } catch {
+          // Nothing on the phone claims this kind: fall through to the sheet.
+        }
       }
+      await Sharing.shareAsync(file.uri, { mimeType: mime });
     },
     catch: (cause) => new OpenError({ name: file.name, reason: describeCause(cause) }),
   });

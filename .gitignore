@@ -1,0 +1,16 @@
+# Pacchetti compilati: stanno nelle release di GitHub e, sul PC, in releases/
+*.apk
+*.ipa
+releases/
+
+# Quello che il bridge riceve dal telefono
+uploads/
+
+# Python
+__pycache__/
+*.pyc
+
+# Schermate e prove locali
+emulator_*.png
+.lavish/
+.claude/

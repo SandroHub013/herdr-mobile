@@ -1,0 +1,46 @@
+# Controlli a ogni push e pull request: i tipi dell'app e la sintassi del
+# bridge. Niente build native qui, che costano minuti macOS; quelle stanno
+# in ios.yml e partono da una release.
+name: Controlli
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: controlli-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  app:
+    name: App (TypeScript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+        with:
+          bun-version: 1.4.0
+      - name: Dipendenze
+        working-directory: app
+        run: bun install --frozen-lockfile
+      - name: Tipi
+        working-directory: app
+        run: bun x tsc --noEmit -p .
+
+  bridge:
+    name: Bridge (Python)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Sintassi
+        run: python3 -m py_compile bridge/bridge.py

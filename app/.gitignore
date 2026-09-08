@@ -36,7 +36,8 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-# iOS is still generated. android/ is source: it holds the splash, the icons
-# and the install permission done by hand, and the keystore every update must
-# be signed with.
+# iOS is generated on the macOS runner (see .github/workflows/ios.yml).
+# android/ is source: it holds the splash, the icons and the install
+# permission done by hand. The release key is not here: release.mjs reads it
+# from ~/.herdr-mobile, outside any repository.
 /ios
