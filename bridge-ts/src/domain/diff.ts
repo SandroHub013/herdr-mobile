@@ -135,6 +135,8 @@ export function buildDiff(options: {
   readonly after: string;
   /** The file as it stands, when it could be read: only used to number the lines. */
   readonly fileText?: string;
+  /** Where the old text sat, when the agent said so itself. Beats searching for it. */
+  readonly startLine?: number;
 }): Diff {
   const before = lines(options.before);
   const after = lines(options.after);
@@ -152,7 +154,10 @@ export function buildDiff(options: {
   const ops = lcsOps(before, after);
   const added = ops.filter((op) => op.kind === 'added').length;
   const removed = ops.filter((op) => op.kind === 'removed').length;
-  const firstLine = anchorLine(options.fileText, options.before);
+  const firstLine =
+    options.startLine && options.startLine > 0
+      ? options.startLine
+      : anchorLine(options.fileText, options.before);
 
   return new Diff({
     path: options.path,
@@ -161,6 +166,66 @@ export function buildDiff(options: {
     hunks: toHunks(ops, firstLine || 1),
     truncated: false,
   });
+}
+
+/** Several edits to one file, reported as one change. */
+export function mergeDiffs(path: string, parts: ReadonlyArray<Diff>): Diff {
+  return new Diff({
+    path,
+    added: parts.reduce((sum, part) => sum + part.added, 0),
+    removed: parts.reduce((sum, part) => sum + part.removed, 0),
+    hunks: parts.flatMap((part) => part.hunks),
+    truncated: parts.some((part) => part.truncated),
+  });
+}
+
+const HUNK_HEADER = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
+/**
+ * A patch the agent already wrote out, read back into hunks.
+ *
+ * Some agents record what they changed as a unified diff rather than as the
+ * text before and after; the numbering is then theirs, taken from the hunk
+ * headers, and nothing has to be searched for.
+ */
+export function parseUnifiedDiff(path: string, patch: string): Diff {
+  const hunks: DiffHunk[] = [];
+  let current: { startLine: number; lines: Array<{ kind: 'context' | 'added' | 'removed'; text: string }> } | null = null;
+  let added = 0;
+  let removed = 0;
+  let total = 0;
+
+  const close = () => {
+    if (current && current.lines.length > 0) {
+      hunks.push(new DiffHunk({ startLine: current.startLine, lines: current.lines }));
+    }
+    current = null;
+  };
+
+  for (const raw of patch.replace(/\r\n/g, '\n').split('\n')) {
+    const header = HUNK_HEADER.exec(raw);
+    if (header) {
+      close();
+      current = { startLine: Number(header[1]) || 1, lines: [] };
+      continue;
+    }
+    if (!current) continue;
+    if (raw.startsWith('+++') || raw.startsWith('---') || raw.startsWith('\\')) continue;
+    total++;
+    if (raw.startsWith('+')) {
+      added++;
+      current.lines.push({ kind: 'added', text: raw.slice(1) });
+    } else if (raw.startsWith('-')) {
+      removed++;
+      current.lines.push({ kind: 'removed', text: raw.slice(1) });
+    } else {
+      current.lines.push({ kind: 'context', text: raw.startsWith(' ') ? raw.slice(1) : raw });
+    }
+  }
+  close();
+
+  if (total > MAX_LINES) return new Diff({ path, added, removed, hunks: [], truncated: true });
+  return new Diff({ path, added, removed, hunks, truncated: false });
 }
 
 /** A file created from nothing: every line is an addition. */

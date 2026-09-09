@@ -4,7 +4,10 @@ import { HttpLayerRouter } from '@effect/platform';
 import { NodeContext, NodeHttpServer, NodeRuntime } from '@effect/platform-node';
 import { Effect, Layer, Logger, LogLevel } from 'effect';
 import * as Adapter from './adapters/Adapter.ts';
+import * as Antigravity from './adapters/Antigravity.ts';
 import * as ClaudeCode from './adapters/ClaudeCode.ts';
+import * as Codex from './adapters/Codex.ts';
+import * as Prime from './adapters/Prime.ts';
 import * as Terminal from './adapters/Terminal.ts';
 import * as FileRoutes from './FileRoutes.ts';
 import * as ReleaseRoutes from './ReleaseRoutes.ts';
@@ -88,8 +91,11 @@ const AdaptersLive = Layer.effect(
   Adapter.Adapters,
   Effect.gen(function* () {
     const claudeCode = yield* ClaudeCode.make;
+    const antigravity = yield* Antigravity.make;
+    const codex = yield* Codex.make;
+    const prime = yield* Prime.make;
     const terminal = yield* Terminal.make;
-    const structured = [claudeCode];
+    const structured = [claudeCode, antigravity, codex, prime];
     return {
       all: [...structured, terminal],
       forPane: (pane) =>

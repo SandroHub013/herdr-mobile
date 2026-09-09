@@ -287,12 +287,14 @@ function HerdrApp() {
         toast.show('Nessuna finestra selezionata');
         return;
       }
-      sendText(activePaneId, keys);
+      // Typed and submitted like a message: the line, then Enter as its own
+      // event. A newline inside the text would be kept as text, not sent.
+      submit(activePaneId, keys);
       // The setting lands in the transcript a moment later; ask sooner than
       // the idle poll would, so the pill agrees with the agent.
       void conversation.refresh();
     },
-    [activePaneId, conversation, sendText, toast],
+    [activePaneId, conversation, submit, toast],
   );
 
   /** Stops the agent with the keys its manifest names, not with a guess. */

@@ -1,6 +1,7 @@
 import { HttpLayerRouter, HttpServerRequest, HttpServerResponse } from '@effect/platform';
-import { Effect, Layer, Stream } from 'effect';
+import { Effect, Layer, Queue, Stream } from 'effect';
 import { BridgeConfig } from './services/Config.ts';
+import { HerdrRpc } from './services/HerdrRpc.ts';
 import { Snapshots } from './services/Snapshot.ts';
 
 /**
@@ -22,7 +23,15 @@ const AUTH_GRACE_MS = 3000;
 interface Inbound {
   readonly action?: string;
   readonly token?: string;
+  readonly pane_id?: string;
+  readonly text?: string;
+  readonly keys?: ReadonlyArray<string>;
 }
+
+/** Something the phone typed, waiting its turn at the pipe. */
+type Typed =
+  | { readonly kind: 'text'; readonly paneId: string; readonly text: string }
+  | { readonly kind: 'keys'; readonly paneId: string; readonly keys: ReadonlyArray<string> };
 
 export const layer = HttpLayerRouter.add(
   'GET',
@@ -31,12 +40,30 @@ export const layer = HttpLayerRouter.add(
     const request = yield* HttpServerRequest.HttpServerRequest;
     const config = yield* BridgeConfig;
     const snapshots = yield* Snapshots;
+    const rpc = yield* HerdrRpc;
     const socket = yield* request.upgrade;
     const write = yield* socket.writer;
 
     const send = (message: unknown) => write(JSON.stringify(message));
 
     let authorized = false;
+
+    /**
+     * Typing comes down the socket too, and its order is the whole point.
+     * A message is sent as three frames — clear the line, the text, Enter —
+     * and if Enter overtook the text the agent would receive an empty line
+     * followed by a prompt it never submits. So every frame goes through one
+     * queue drained by one fiber, and reaches Herdr in the order it was typed.
+     */
+    const typed = yield* Queue.unbounded<Typed>();
+    yield* Stream.fromQueue(typed).pipe(
+      Stream.runForEach((item) =>
+        item.kind === 'text'
+          ? rpc.callOption('pane.send_text', { pane_id: item.paneId, text: item.text })
+          : rpc.callOption('pane.send_keys', { pane_id: item.paneId, keys: item.keys }),
+      ),
+      Effect.forkScoped,
+    );
 
     /**
      * A socket that never presents a token is closed rather than left open:
@@ -95,9 +122,14 @@ export const layer = HttpLayerRouter.add(
         return send({ type: 'pong' }).pipe(Effect.orElseSucceed(() => undefined));
       }
 
-      // send_text and send_keys used to come down here as well. They are
-      // ordinary requests now: they can fail, and a socket has nowhere to put
-      // a failure the reader needs to see.
+      if (message.action === 'send_text' && message.pane_id && typeof message.text === 'string') {
+        return Queue.offer(typed, { kind: 'text', paneId: message.pane_id, text: message.text });
+      }
+
+      if (message.action === 'send_keys' && message.pane_id && Array.isArray(message.keys)) {
+        return Queue.offer(typed, { kind: 'keys', paneId: message.pane_id, keys: message.keys });
+      }
+
       return;
     });
 

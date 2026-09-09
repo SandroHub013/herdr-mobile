@@ -18,6 +18,7 @@ import { buildDiff, wholeFileDiff } from '../domain/diff.ts';
 import { HerdrRpc } from '../services/HerdrRpc.ts';
 import { Transcript, type Consumer } from '../services/Transcript.ts';
 import { AdapterError, type Adapter, type PaneInfo } from './Adapter.ts';
+import { Ledger } from './Ledger.ts';
 
 /**
  * Claude Code.
@@ -146,7 +147,7 @@ function describeTool(
 // -------------------------------------------------------------------- parsing
 
 interface State {
-  events: AgentEvent[];
+  ledger: Ledger;
   /** Calls waiting for their result, so a later line can complete them. */
   byToolId: Map<string, ToolEvent>;
   /** Background runs by the id Claude Code hands out, so the end can be matched. */
@@ -154,37 +155,22 @@ interface State {
   /** Blocks of one reply arrive as separate lines; they are one message. */
   lastAssistant?: { mid: string; event: MessageEvent };
   permissionMode?: string;
-  seq: number;
-  /** Bumped on every write, appended or amended. */
-  rev: number;
-  /** When each event last changed, so the app can ask for only those. */
-  revBySeq: Map<number, number>;
 };
 
-const touch = (state: State, seq: number) => {
-  state.rev += 1;
-  state.revBySeq.set(seq, state.rev);
-};
-
-const push = (state: State, make: (seq: number) => AgentEvent): AgentEvent => {
-  const event = make(state.seq++);
-  state.events.push(event);
-  touch(state, event.seq);
-  return event;
-};
+const push = <E extends AgentEvent>(state: State, make: (seq: number) => E): E =>
+  state.ledger.push(make);
 
 /**
- * Replaces an event in place. The events are immutable Schema classes, so
- * completing a tool call means swapping the whole event for a new one — which
- * is also what keeps a half-updated call from ever being observable.
+ * Swaps a tool event for a newer one and keeps the lookups pointing at it. The
+ * ledger handles the numbering; what belongs here is only the bookkeeping this
+ * agent needs — a call is found again by its own id, and a background run by
+ * the task id Claude Code hands out.
  */
 const replace = (state: State, previous: ToolEvent, next: ToolEvent) => {
-  const at = state.events.indexOf(previous);
-  if (at !== -1) state.events[at] = next;
+  state.ledger.replace(previous, next);
   state.byToolId.set(next.call.id, next);
   const task = next.call.background?.id;
   if (task) state.byTaskId.set(task, next);
-  touch(state, next.seq);
 };
 
 const TASK_NOTIFICATION = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/;
@@ -259,17 +245,14 @@ function consume(state: State, line: string): void {
         // Same message id as the block before it: one reply, split over lines.
         const open = state.lastAssistant;
         if (mid && open && open.mid === mid) {
-          const merged = new MessageEvent({ ...open.event, text: `${open.event.text}\n\n${text}` });
-          const at = state.events.indexOf(open.event);
-          if (at !== -1) state.events[at] = merged;
-          touch(state, merged.seq);
+          const merged = state.ledger.replace(
+            open.event,
+            new MessageEvent({ ...open.event, text: `${open.event.text}\n\n${text}` }),
+          );
           state.lastAssistant = { mid, event: merged };
           continue;
         }
-        const event = push(
-          state,
-          (seq) => new MessageEvent({ seq, role: 'assistant', text, time }),
-        ) as MessageEvent;
+        const event = push(state, (seq) => new MessageEvent({ seq, role: 'assistant', text, time }));
         if (mid) state.lastAssistant = { mid, event };
         continue;
       }
@@ -416,12 +399,9 @@ function completeCall(
 
 const consumer: Consumer<State> = {
   init: () => ({
-    events: [],
+    ledger: new Ledger(),
     byToolId: new Map(),
     byTaskId: new Map(),
-    seq: 0,
-    rev: 0,
-    revBySeq: new Map(),
   }),
   consume,
 };
@@ -452,20 +432,25 @@ const capabilitiesFor = (permissionMode: string | undefined): Capabilities =>
         id: 'model',
         label: 'Modello',
         placeholder: 'Modello',
+        // No trailing newline in `send`: an agent's input treats a burst of
+        // characters ending in one as a paste and keeps it as text. The app
+        // types the line and presses Enter as two events, the way it does for
+        // a message.
         options: [
-          new ControlOption({ id: 'opus', label: 'Opus 5', send: '/model opus\r' }),
-          new ControlOption({ id: 'sonnet', label: 'Sonnet 5', send: '/model sonnet\r' }),
-          new ControlOption({ id: 'haiku', label: 'Haiku 4.5', send: '/model haiku\r' }),
+          new ControlOption({ id: 'fable', label: 'Fable 5.1', send: '/model fable' }),
+          new ControlOption({ id: 'opus', label: 'Opus 5', send: '/model opus' }),
+          new ControlOption({ id: 'sonnet', label: 'Sonnet 5', send: '/model sonnet' }),
+          new ControlOption({ id: 'haiku', label: 'Haiku 4.5', send: '/model haiku' }),
         ],
       }),
       new Control({
         id: 'effort',
         label: 'Impegno',
         options: [
-          new ControlOption({ id: 'low', label: 'Basso', send: '/effort low\r' }),
-          new ControlOption({ id: 'medium', label: 'Medio', send: '/effort medium\r' }),
-          new ControlOption({ id: 'high', label: 'Alto', note: 'Predefinito', send: '/effort high\r' }),
-          new ControlOption({ id: 'max', label: 'Max', send: '/effort max\r' }),
+          new ControlOption({ id: 'low', label: 'Basso', send: '/effort low' }),
+          new ControlOption({ id: 'medium', label: 'Medio', send: '/effort medium' }),
+          new ControlOption({ id: 'high', label: 'Alto', note: 'Predefinito', send: '/effort high' }),
+          new ControlOption({ id: 'max', label: 'Max', send: '/effort max' }),
         ],
       }),
       new Control({
@@ -566,19 +551,15 @@ export const make: Effect.Effect<Adapter, never, HerdrRpc | Transcript> = Effect
           const state = yield* transcript.read(located.file, consumer).pipe(
             Effect.mapError((cause) => new AdapterError({ adapter: 'claude-code', reason: cause.reason })),
           );
-          // Whatever changed since the app last looked, appended or amended.
-          const changed =
-            since <= 0
-              ? state.events
-              : state.events.filter((event) => (state.revBySeq.get(event.seq) ?? 0) > since);
           return new ConversationPage({
             paneId: pane.paneId,
             agent: 'claude-code',
             session: located.session,
             match: located.match,
-            total: state.events.length,
-            rev: state.rev,
-            events: changed,
+            total: state.ledger.events.length,
+            rev: state.ledger.revision,
+            // Whatever changed since the app last looked, appended or amended.
+            events: state.ledger.changedSince(since),
           });
         }),
     };
