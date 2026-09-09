@@ -7,6 +7,7 @@ import * as Adapter from './adapters/Adapter.ts';
 import * as ClaudeCode from './adapters/ClaudeCode.ts';
 import * as Terminal from './adapters/Terminal.ts';
 import * as FileRoutes from './FileRoutes.ts';
+import * as ReleaseRoutes from './ReleaseRoutes.ts';
 import * as Routes from './Routes.ts';
 import * as Socket from './Socket.ts';
 import * as Config from './services/Config.ts';
@@ -27,19 +28,24 @@ import * as Transcript from './services/Transcript.ts';
 interface Args {
   readonly host?: string;
   readonly lan: boolean;
+  readonly port: number;
   readonly socketPath: string;
 }
 
 function parseArgs(argv: ReadonlyArray<string>): Args {
   let host: string | undefined;
   let lan = false;
+  // Overridable so this bridge can run beside the one already serving a
+  // phone, on its own port, until the phone has a build that speaks to it.
+  let port = Config.PORT;
   let socketPath = Config.DEFAULT_SOCKET_PATH;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--lan') lan = true;
     else if (argv[i] === '--host') host = argv[++i];
+    else if (argv[i] === '--port') port = Number(argv[++i]) || Config.PORT;
     else if (argv[i] === '--socket') socketPath = argv[++i];
   }
-  return { host, lan, socketPath };
+  return { host, lan, port, socketPath };
 }
 
 /** The Tailscale address of this machine, when it is on a tailnet. */
@@ -65,7 +71,11 @@ function chooseBind(args: Args): { host: string; note: string } {
 const args = parseArgs(process.argv.slice(2));
 const bind = chooseBind(args);
 
-const ConfigLive = Config.layer({ host: bind.host, socketPath: args.socketPath });
+const ConfigLive = Config.layer({
+  host: bind.host,
+  port: args.port,
+  socketPath: args.socketPath,
+});
 const RpcLive = HerdrRpc.layer(args.socketPath);
 const TranscriptLive = Transcript.layer;
 
@@ -131,13 +141,14 @@ const banner = Effect.gen(function* () {
 const Application = Layer.mergeAll(
   Routes.layer,
   FileRoutes.layer,
+  ReleaseRoutes.layer,
   Socket.layer,
   Layer.effectDiscard(banner),
 ).pipe(Layer.provide(HttpLayerRouter.cors({ allowedOrigins: ['*'], allowedHeaders: ['*'] })));
 
 HttpLayerRouter.serve(Application).pipe(
   Layer.provide(Services),
-  Layer.provide(NodeHttpServer.layer(createServer, { port: Config.PORT, host: bind.host })),
+  Layer.provide(NodeHttpServer.layer(createServer, { port: args.port, host: bind.host })),
   Layer.launch,
   Logger.withMinimumLogLevel(LogLevel.Info),
   NodeRuntime.runMain,
