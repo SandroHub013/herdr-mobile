@@ -1,1 +1,5 @@
 node_modules/
+# What the bridge prints while it runs, when it is started from a launcher
+# that redirects its output. It says what happened on one machine on one day.
+bridge.log
+bridge.log.err
