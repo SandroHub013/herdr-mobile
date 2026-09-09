@@ -9,7 +9,7 @@ import {
   type ToolCall,
 } from '../../domain/events';
 import type { useConversation } from '../../hooks/useConversation';
-import { colors, radius, space, type } from '../../theme';
+import { colors, monoFamily, radius, space, type } from '../../theme';
 import { BackgroundBadge, BackgroundSheet } from './BackgroundSheet';
 import { Markdown } from './Markdown';
 import { ToolGroupRow } from './ToolGroup';
@@ -99,6 +99,20 @@ export function ChatFeed({
     );
   }
 
+  if (status === 'unsupported') {
+    return (
+      <View style={styles.centre}>
+        <Text style={styles.emptyTitle}>Il bridge sul PC è vecchio</Text>
+        <Text style={styles.emptyBody}>
+          Questa versione dell'app legge le conversazioni, e il bridge in ascolto non
+          conosce ancora quel modo di parlare. Avvia{' '}
+          <Text style={styles.emphasis}>start_bridge_next.bat</Text> sul PC e, nel pannello
+          Connessione, cambia la porta in <Text style={styles.emphasis}>43738</Text>.
+        </Text>
+      </View>
+    );
+  }
+
   if (status === 'missing' || status === 'failed') {
     return (
       <View style={styles.centre}>
@@ -172,6 +186,7 @@ const styles = StyleSheet.create({
   },
   emptyTitle: { ...type.title, color: colors.text, marginBottom: space.sm },
   emptyBody: { ...type.body, color: colors.textFaint, textAlign: 'center', lineHeight: 20 },
+  emphasis: { color: colors.text, fontFamily: monoFamily },
 
   fallback: {
     backgroundColor: colors.surfaceRaised,
