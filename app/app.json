@@ -2,14 +2,14 @@
   "expo": {
     "name": "Herdr Mobile",
     "slug": "herdr-mobile",
-    "version": "1.3.0",
+    "version": "1.3.1",
     "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#0B0B0D",
     "ios": {
       "bundleIdentifier": "dev.herdr.mobile",
-      "buildNumber": "15",
+      "buildNumber": "16",
       "supportsTablet": true,
       "infoPlist": {
         "NSAppTransportSecurity": {
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "dev.herdr.mobile",
-      "versionCode": 15,
+      "versionCode": 16,
       "permissions": [
         "android.permission.REQUEST_INSTALL_PACKAGES"
       ],
